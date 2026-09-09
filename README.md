@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-10. Implemented so far:
+Status: Phase 0-11. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -53,10 +53,17 @@ Status: Phase 0-10. Implemented so far:
   as one finding instead of N (`src/project/Scc.zig`). The CLI groups a
   dead symbol's whole cyclic component into one `cycle of N
   declaration(s)...` report.
+- `BuildGraph`: a syntactic scan of a `build.zig`'s local module graph
+  (`b.createModule(...)` + `.addImport("name", ...)` bindings), so
+  named-module imports like `@import("storage")` resolve to their file
+  instead of staying unresolved (`src/project/BuildGraph.zig`). Enabled
+  with `--build-zig <path>`; dependency modules (`b.dependency(...)`) stay
+  unresolved, since they aren't backed by a local file.
 
 Not yet implemented: instance-method resolution (needs real type
-inference), `build.zig` module graph integration. See `docs/ROADMAP.md`
-for the full phase plan.
+inference), per-target file sets in `build.zig` (e.g. `linux.zig` vs
+`windows.zig` chosen by target). See `docs/ROADMAP.md` for the full phase
+plan.
 
 ## Build
 
@@ -80,6 +87,9 @@ zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
 - `--dir <path>`: directory to scan for orphan `.zig` files (default `.`).
 - `--library`: treat every `pub` symbol as reachable library API (default:
   executable mode, where `pub` alone doesn't make a symbol a root).
+- `--build-zig <build.zig>`: resolve named-module `@import(...)`s that
+  `build.zig` wires up locally via `b.createModule(...)` +
+  `.addImport(...)`, instead of leaving them unresolved.
 
 Exits non-zero if any orphan files are found.
 
@@ -102,6 +112,7 @@ src/
     FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution
     DynamicField.zig          @field(Foo, name) resolution (comptime + runtime name)
     Scc.zig                   Tarjan SCC over the declaration graph
+    BuildGraph.zig            build.zig module-name -> file resolution
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```

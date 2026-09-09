@@ -16,6 +16,7 @@ const FileId = @import("project/FileId.zig").FileId;
 const File = @import("project/File.zig");
 const ImportGraph = @import("project/ImportGraph.zig");
 const SymbolId = @import("project/SymbolId.zig").SymbolId;
+const BuildGraph = @import("project/BuildGraph.zig");
 
 const Project = @This();
 
@@ -25,6 +26,12 @@ files: std.ArrayListUnmanaged(File) = .empty,
 by_path: std.StringHashMapUnmanaged(FileId) = .empty,
 roots: std.ArrayListUnmanaged(FileId) = .empty,
 import_graph: ImportGraph = .empty,
+/// Named-module imports (`@import("some_mod")`) that `build_graph`
+/// resolves to a local file, keyed by the `build.zig`'s directory. `null`
+/// until `loadBuildGraph` is called; named-module imports stay unresolved
+/// without it.
+build_graph: ?BuildGraph = null,
+build_graph_dir: []const u8 = "",
 
 pub fn init(gpa: Allocator) Project {
     return .{ .gpa = gpa };
@@ -36,7 +43,28 @@ pub fn deinit(self: *Project) void {
     self.by_path.deinit(self.gpa);
     self.roots.deinit(self.gpa);
     self.import_graph.deinit(self.gpa);
+    if (self.build_graph) |*bg| bg.deinit(self.gpa);
+    if (self.build_graph_dir.len > 0) self.gpa.free(self.build_graph_dir);
     self.* = undefined;
+}
+
+/// Parses `build_zig_path` and records its local module graph, so
+/// `@import("name")` module specifiers it defines via
+/// `b.createModule(...)` + `.addImport("name", ...)` resolve to files
+/// instead of being reported unresolved. Must be called before `addRoot`
+/// for roots that use those imports.
+pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
+    const canonical = try self.canonicalize(build_zig_path);
+    defer self.gpa.free(canonical);
+
+    const source = try File.readFileSentinel(self.gpa, canonical);
+    defer self.gpa.free(source);
+
+    var graph = try BuildGraph.parse(self.gpa, source);
+    errdefer graph.deinit(self.gpa);
+
+    self.build_graph_dir = try self.gpa.dupe(u8, std.fs.path.dirname(canonical) orelse ".");
+    self.build_graph = graph;
 }
 
 pub fn file(self: *const Project, id: FileId) *const File {
@@ -84,7 +112,26 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
     for (imports) |entry| {
         switch (entry.kind) {
             .module => {
-                try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                const build_graph = self.build_graph orelse {
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    continue;
+                };
+                const rel_path = build_graph.resolve(entry.specifier) orelse {
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    continue;
+                };
+
+                const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch {
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    continue;
+                };
+                defer self.gpa.free(target_path);
+
+                const target_id = self.loadRecursive(target_path) catch {
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    continue;
+                };
+                try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.specifier, ".zig")) {

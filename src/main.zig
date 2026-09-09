@@ -18,6 +18,7 @@ const Options = struct {
     scan_dir: []const u8 = ".",
     public_policy: zigroot.Roots.PublicPolicy = .analyze,
     include_possible: bool = false,
+    build_zig: ?[]const u8 = null,
 
     fn deinit(self: *Options, gpa: std.mem.Allocator) void {
         self.roots.deinit(gpa);
@@ -53,6 +54,11 @@ pub fn main() !u8 {
             opts.public_policy = .root;
         } else if (std.mem.eql(u8, arg, "--include-possible")) {
             opts.include_possible = true;
+        } else if (std.mem.eql(u8, arg, "--build-zig")) {
+            opts.build_zig = args.next() orelse {
+                std.debug.print("error: --build-zig requires a path argument\n", .{});
+                return 1;
+            };
         } else {
             std.debug.print("error: unrecognized argument '{s}'\n", .{arg});
             return 1;
@@ -74,6 +80,11 @@ pub fn main() !u8 {
             \\             an unresolved dynamic access (e.g. `@field(Foo,
             \\             name)` with a runtime name) as dead, instead of
             \\             giving them the benefit of the doubt
+            \\  --build-zig <build.zig>
+            \\             resolve named-module @import(...)s (e.g.
+            \\             @import("storage")) that build.zig wires up via
+            \\             b.createModule(...) + .addImport(...), instead
+            \\             of leaving them unresolved
             \\
         , .{});
         return 1;
@@ -83,6 +94,14 @@ pub fn main() !u8 {
     defer project.deinit();
 
     var had_errors = false;
+
+    if (opts.build_zig) |build_zig_path| {
+        project.loadBuildGraph(build_zig_path) catch |err| {
+            std.debug.print("error: failed to load build graph from '{s}': {s}\n", .{ build_zig_path, @errorName(err) });
+            had_errors = true;
+        };
+    }
+
     for (opts.roots.items) |root| {
         _ = project.addRoot(root) catch |err| {
             std.debug.print("error: failed to load root '{s}': {s}\n", .{ root, @errorName(err) });

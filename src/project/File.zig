@@ -66,7 +66,7 @@ pub fn deinit(self: *File, gpa: Allocator) void {
     self.* = undefined;
 }
 
-fn readFileSentinel(gpa: Allocator, path: []const u8) ![:0]u8 {
+pub fn readFileSentinel(gpa: Allocator, path: []const u8) ![:0]u8 {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
     const stat = try file.stat();

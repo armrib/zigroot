@@ -172,8 +172,32 @@ Added `src/project/FieldChain.zig`, shared by `SymbolGraph` (same-file) and
   Non-cyclic singleton components still report individually, unchanged
   from Phase 9.
 
+## Phase 11 — build.zig module graph integration (done)
+
+- `src/project/BuildGraph.zig`: a syntactic scan over a `build.zig`'s AST
+  (`std.zig.Ast`, not ZLint's `Semantic` — `build.zig` isn't project code
+  under analysis) for the `const x = b.createModule(.{ .root_source_file =
+  b.path("...") });` + `<module>.addImport("name", x);` shape. Not a real
+  evaluation of the build script (that would mean running it); a
+  `build.zig` with unrecognized shapes just yields a partial or empty
+  graph rather than erroring. Modules that come from
+  `b.dependency(...).module(...)` aren't backed by a local file and stay
+  unresolved, same as before this phase.
+- `Project.loadBuildGraph(path)`: parses `path`, storing the resulting
+  name -> file mapping and the `build.zig`'s directory (mapped paths are
+  relative to it). Must be called before `addRoot` for roots that use
+  named-module imports it should resolve.
+- `Project.loadRecursive`'s `.module` case now checks the build graph
+  before falling back to `addUnresolved`: a resolved name is loaded and
+  linked into `ImportGraph` exactly like a `.file` import.
+- CLI: `--build-zig <build.zig>` flag, optional. Without it, named-module
+  imports are unresolved as before (this phase is additive).
+
 ## Later / not scheduled
 
-- Real `build.zig` module graph integration instead of `--root` flags, so
-  `@import("some_dep")` and per-target file sets (e.g. `linux.zig` vs
-  `windows.zig`) resolve correctly.
+- Per-target file sets (e.g. `linux.zig` vs `windows.zig` selected by
+  `target.os.tag` inside `build.zig`) — `BuildGraph` resolves one
+  `root_source_file` per module regardless of build options, so a
+  conditionally-selected file always resolves to whichever branch's
+  `b.path(...)` its scan finds. Genuinely evaluating `build.zig`'s control
+  flow would need to actually run it.

@@ -107,3 +107,48 @@ test "unresolved module imports are recorded, not treated as errors" {
     try t.expectEqual(@as(usize, 1), project.import_graph.unresolved.items.len);
     try t.expectEqualStrings("std", project.import_graph.unresolved.items[0].specifier);
 }
+
+test "loadBuildGraph resolves a named-module @import to its file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const storage_mod = b.createModule(.{
+        \\        .root_source_file = b.path("src/storage.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("storage", storage_mod);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const storage = @import("storage");
+        \\pub fn main() void {
+        \\    storage.start();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/storage.zig",
+        \\pub fn start() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
+}
