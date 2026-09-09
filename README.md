@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-1 MVP. Implemented so far:
+Status: Phase 0-3. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -17,11 +17,17 @@ Status: Phase 0-1 MVP. Implemented so far:
 - Named-module imports (`@import("std")`, `@import("some_dep")`) are
   recorded as unresolved rather than treated as errors — resolving those
   needs `build.zig` module information, which is future work.
+- `SymbolId`: pairs one of ZLint's per-file `Symbol.Id`s with the owning
+  `FileId`, giving a project-wide symbol identity (`src/project/SymbolId.zig`).
+- `OwnerMap`: for every AST node in a file, the declaration (symbol) whose
+  body contains it, derived from ZLint's per-node parent links
+  (`src/project/OwnerMap.zig`). `File` builds one alongside its `semantic`.
 
-Not yet implemented: declaration-level reachability, cross-file member
-resolution (`storage.start()`), roots beyond explicit `--root` (tests,
-exports, `pub` policy), SCC reporting. See the design discussion this was
-scaffolded from for the full phase plan.
+Not yet implemented: the same-file declaration graph and reachability
+analysis that turn `OwnerMap` into actual dead-code output, cross-file
+member resolution (`storage.start()`), roots beyond explicit `--root`
+(tests, exports, `pub` policy), SCC reporting. See `docs/ROADMAP.md` for
+the full phase plan.
 
 ## Build
 
@@ -54,8 +60,10 @@ src/
   Project.zig                 file graph + orphan detection
   project/
     FileId.zig
-    File.zig                  one parsed+analyzed file (owns zlint.Semantic)
+    File.zig                  one parsed+analyzed file (owns zlint.Semantic + OwnerMap)
     ImportGraph.zig           file-level @import edges
+    SymbolId.zig              project-wide symbol identity
+    OwnerMap.zig              node -> containing-declaration map
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```
