@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-15. Implemented so far:
+Status: Phase 0-16. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -77,7 +77,10 @@ Status: Phase 0-15. Implemented so far:
   `SymbolGraph`). `Resolver` extends this across an `@import` boundary too:
   `var s: storage.Widget = ...; s.run();` resolves `storage.Widget` into the
   target file's exports the same way `storage.foo()` does, then chains `s`'s
-  own references the same way.
+  own references the same way. `Roots`' `.test`-root case resolves instance
+  types too, both same-file and cross-file, so an instance-method call in a
+  `test { ... }` block seeds reachability from the method the same way a
+  static `Foo.run()` call in a test already did.
 
 Not yet implemented: an instance type named through a same-file chain
 *before* crossing an `@import` boundary (`var s: mod.storage.Widget =

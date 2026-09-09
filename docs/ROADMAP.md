@@ -312,6 +312,37 @@ binding) fell through, same shape of gap Phase 6 filled for static
 - Still one hop only: `var s: mod.storage.Widget = ...` (a same-file chain
   before the `@import` crossing) isn't attempted, matching `crossFileRoot`'s
   "single field-access hop off a plain identifier" scope.
+- `Roots`' `.test`-root case didn't call `InstanceType` yet at the time —
+  an instance-method call on a locally-typed variable declared inside a
+  `test { ... }` block wasn't a root source on its own (only reachable if
+  something *else* already reached it).
+
+## Phase 16 — Instance types in `Roots`' `.test`-root case (done)
+
+The last of the three call sites `FieldChain.resolveChain` needed
+`InstanceType` wired into (`SymbolGraph`, `Resolver`, `Roots`) — a test body
+declaring `var s: Foo = ...;` and calling `s.run()` didn't make `Foo.run` a
+root the way `Foo.run()` written directly would have.
+
+- `Roots.build`'s existing per-symbol loop now also resolves
+  `InstanceType.resolve(semantic, sym_id)` (same-file) and, when that's
+  `null`, a new `crossInstanceType` helper — `InstanceType.crossFileRoot`
+  finished the same way `Resolver.buildInstanceTypes` finishes it: confirm
+  the type's root identifier is really one of the file's `@import` bindings
+  (`importTarget`, a copy of `Resolver`'s private helper of the same name —
+  `Roots` needs the plain target-file answer per symbol, not graph edges to
+  build from it), then `FieldChain.findExport` the field name against the
+  target file's exports.
+- For every reference to that symbol found inside a `test` block, both
+  give a `FieldChain.resolveChain` starting point in addition to the
+  existing one seeded from the symbol itself (unchanged): one within the
+  same file at `.possible` confidence for the same-file case, one in the
+  target file's `Semantic` at `.possible` for the cross-file case — same
+  split `SymbolGraph`/`Resolver` already use.
+- `importTarget` is duplicated rather than shared between `Roots` and
+  `Resolver` (small, and the two callers want different return shapes)
+  matching the project's general "three similar lines beat a premature
+  abstraction" approach elsewhere.
 
 ## Later / not scheduled
 
