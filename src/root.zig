@@ -7,6 +7,7 @@ pub const FileId = @import("project/FileId.zig").FileId;
 pub const File = @import("project/File.zig");
 pub const ImportGraph = @import("project/ImportGraph.zig");
 pub const OwnerMap = @import("project/OwnerMap.zig");
+pub const SymbolGraph = @import("project/SymbolGraph.zig");
 pub const SymbolId = @import("project/SymbolId.zig").SymbolId;
 pub const Project = @import("Project.zig");
 
@@ -16,4 +17,5 @@ test {
     _ = @import("semantic_reuse_test.zig");
     _ = @import("Project_test.zig");
     _ = @import("project/OwnerMap_test.zig");
+    _ = @import("project/SymbolGraph_test.zig");
 }

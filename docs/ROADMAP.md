@@ -1,6 +1,6 @@
 # Roadmap
 
-Phase 0-3 are done (see README.md). This tracks what's left to get from
+Phase 0-4 are done (see README.md). This tracks what's left to get from
 "file-level orphan detection" to "declaration-level dead-code analysis
 across a whole project".
 
@@ -31,7 +31,7 @@ it. Needed to invert ZLint's `Reference -> Symbol` links into
   a node that's some symbol's `decl` — the nearest enclosing declaration.
 - `File` holds its `OwnerMap` alongside `semantic`, built in `File.load`.
 
-## Phase 4 — Same-file declaration graph
+## Phase 4 — Same-file declaration graph (done)
 
 Using `OwnerMap` + each `Reference.symbol` already resolved by ZLint,
 build `SymbolId -> SymbolId` edges for references within one file.
@@ -39,6 +39,11 @@ build `SymbolId -> SymbolId` edges for references within one file.
 - `src/project/SymbolGraph.zig`: adjacency keyed by `SymbolId`, same shape
   as `ImportGraph` (`edges: ArrayListUnmanaged(Edge)`,
   `adjacency: AutoHashMapUnmanaged(SymbolId, ArrayListUnmanaged(SymbolId))`).
+  Built by iterating every symbol's already-resolved incoming references
+  (`Symbol.Table.iterReferences`) and mapping each reference's node through
+  `OwnerMap` to get the edge's source declaration.
+- `File` builds and owns its `SymbolGraph` alongside `semantic` and
+  `owner_map`.
 - Test case: `fn a() void { b(); } fn b() void {}` produces edge `a -> b`.
 
 ## Phase 5 — Roots and reachability

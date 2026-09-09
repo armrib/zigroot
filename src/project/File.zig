@@ -9,6 +9,7 @@ const zlint = @import("zlint");
 
 const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
+const SymbolGraph = @import("SymbolGraph.zig");
 
 const File = @This();
 
@@ -22,6 +23,9 @@ semantic: zlint.Semantic,
 /// Node -> containing-declaration map, built from `semantic`. See
 /// `OwnerMap`.
 owner_map: OwnerMap,
+/// Same-file `Symbol -> Symbol` reference edges, built from `semantic`
+/// and `owner_map`. See `SymbolGraph`.
+symbol_graph: SymbolGraph,
 
 /// Reads `path` from disk, parses it, and runs ZLint's semantic builder
 /// over it. `path` must already be resolved (see `Project.resolvePath`);
@@ -40,16 +44,21 @@ pub fn load(gpa: Allocator, id: FileId, path: []const u8) !File {
     var owner_map = try OwnerMap.build(gpa, &result.value);
     errdefer owner_map.deinit(gpa);
 
+    var symbol_graph = try SymbolGraph.build(gpa, id, &result.value, &owner_map);
+    errdefer symbol_graph.deinit(gpa);
+
     return .{
         .id = id,
         .path = try gpa.dupe(u8, path),
         .source = source,
         .semantic = result.value,
         .owner_map = owner_map,
+        .symbol_graph = symbol_graph,
     };
 }
 
 pub fn deinit(self: *File, gpa: Allocator) void {
+    self.symbol_graph.deinit(gpa);
     self.owner_map.deinit(gpa);
     self.semantic.deinit();
     gpa.free(self.source);
