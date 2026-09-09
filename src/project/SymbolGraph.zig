@@ -108,7 +108,7 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
                 try graph.addEdge(gpa, owner_id, .{ .file = file, .local = chained.symbol }, chained.node, .definite);
             }
 
-            if (DynamicField.resolve(semantic, sym_id, ref.node)) |resolution| switch (resolution) {
+            if (DynamicField.resolve(semantic, semantic, sym_id, ref.node)) |resolution| switch (resolution) {
                 .possible => |target| try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .possible),
                 .unknown => |exports| for (exports) |target| {
                     try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .unknown);

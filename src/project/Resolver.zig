@@ -14,6 +14,11 @@
 //! `storage.Inner.run()`), so static-member access chains through an
 //! `@import` boundary too. Instance-method calls still aren't attempted —
 //! that needs real type inference.
+//!
+//! Phase 12: a reference to the binding used as the container argument of
+//! `@field(storage, name)` is resolved the same way, via `DynamicField`
+//! against the target file's exports — a comptime-known name at `.possible`
+//! confidence, a runtime name as `.unknown` edges to every export.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,6 +29,7 @@ const Project = @import("../Project.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const SymbolGraph = @import("SymbolGraph.zig");
 const FieldChain = @import("FieldChain.zig");
+const DynamicField = @import("DynamicField.zig");
 
 /// Every file's top-level declarations are exported from this symbol.
 /// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
@@ -45,20 +51,30 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
-            const field_name = FieldChain.fieldAccessName(&from_file.semantic, ref.node) orelse continue;
-            const target_local = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, field_name) orelse continue;
             const owner = from_file.owner_map.get(ref.node) orelse continue;
+            const owner_id: SymbolId = .{ .file = import_edge.from, .local = owner };
 
-            const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-            const chained = FieldChain.resolve(&from_file.semantic, target_semantic, target_local, field_node);
+            if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
+                const target_local = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, field_name) orelse continue;
+                const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+                const chained = FieldChain.resolve(&from_file.semantic, target_semantic, target_local, field_node);
 
-            try graph.addEdge(
-                gpa,
-                .{ .file = import_edge.from, .local = owner },
-                .{ .file = import_edge.to, .local = chained.symbol },
-                chained.node,
-                .definite,
-            );
+                try graph.addEdge(
+                    gpa,
+                    owner_id,
+                    .{ .file = import_edge.to, .local = chained.symbol },
+                    chained.node,
+                    .definite,
+                );
+                continue;
+            }
+
+            if (DynamicField.resolve(&from_file.semantic, target_semantic, FILE_ROOT_SYMBOL, ref.node)) |resolution| switch (resolution) {
+                .possible => |target| try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .possible),
+                .unknown => |exports| for (exports) |target| {
+                    try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .unknown);
+                },
+            };
         }
     }
 

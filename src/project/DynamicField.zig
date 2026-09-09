@@ -15,8 +15,14 @@
 //! dynamic dispatch").
 //!
 //! Only resolves one `@field` hop directly on a symbol reference; doesn't
-//! chain through nested calls, and doesn't cross an `@import` boundary
-//! (unlike `FieldChain`/`Resolver`) — out of scope for this pass.
+//! chain through nested calls. Phase 12 lets it cross an `@import`
+//! boundary too, the same way `FieldChain` does: `ast` is the `Semantic`
+//! whose AST contains the `@field(...)` call (the referencing file);
+//! `symbols`/`container` name which `Semantic`'s `Symbol.Table` the field
+//! name is matched against. Same-file callers pass the same `Semantic` for
+//! `ast` and `symbols`, with `container` the symbol referenced by `node`.
+//! `Resolver` passes the source file's `Semantic` as `ast` and the target
+//! file's `Semantic` (with its root symbol) as `symbols`/`container`.
 
 const std = @import("std");
 const zlint = @import("zlint");
@@ -30,32 +36,32 @@ pub const Resolution = union(enum) {
     unknown: []const Semantic.Symbol.Id,
 };
 
-/// If `node` is the container argument of an `@field(node, name)` builtin
-/// call, and `container` (the symbol `node` refers to) has any exports,
-/// resolves it. `null` if `node` isn't such a call, or the container has no
-/// exports to consider.
-pub fn resolve(semantic: *const Semantic, container: Semantic.Symbol.Id, node: Semantic.Ast.Node.Index) ?Resolution {
-    const parent = semantic.node_links.getParent(node) orelse return null;
-    switch (semantic.parse.ast.nodeTag(parent)) {
+/// If `node` (in `ast`) is the container argument of an `@field(node,
+/// name)` builtin call, and `container` (declared in `symbols`) has any
+/// exports, resolves it. `null` if `node` isn't such a call, or the
+/// container has no exports to consider.
+pub fn resolve(ast: *const Semantic, symbols: *const Semantic, container: Semantic.Symbol.Id, node: Semantic.Ast.Node.Index) ?Resolution {
+    const parent = ast.node_links.getParent(node) orelse return null;
+    switch (ast.parse.ast.nodeTag(parent)) {
         .builtin_call_two, .builtin_call_two_comma => {},
         else => return null,
     }
 
-    const main_token = semantic.parse.ast.nodeMainToken(parent);
-    if (!std.mem.eql(u8, semantic.tokenSlice(main_token), "@field")) return null;
+    const main_token = ast.parse.ast.nodeMainToken(parent);
+    if (!std.mem.eql(u8, ast.tokenSlice(main_token), "@field")) return null;
 
-    const pair = semantic.parse.ast.nodeData(parent).opt_node_and_opt_node;
+    const pair = ast.parse.ast.nodeData(parent).opt_node_and_opt_node;
     const base = pair[0].unwrap() orelse return null;
     if (base != node) return null;
     const name_node = pair[1].unwrap() orelse return null;
 
-    const exports = semantic.symbols.getExports(container).items;
+    const exports = symbols.symbols.getExports(container).items;
     if (exports.len == 0) return null;
 
-    if (semantic.parse.ast.nodeTag(name_node) == .string_literal) {
-        const name = std.mem.trim(u8, semantic.tokenSlice(semantic.parse.ast.nodeMainToken(name_node)), "\"");
+    if (ast.parse.ast.nodeTag(name_node) == .string_literal) {
+        const name = std.mem.trim(u8, ast.tokenSlice(ast.parse.ast.nodeMainToken(name_node)), "\"");
         for (exports) |id| {
-            if (std.mem.eql(u8, semantic.symbols.get(id).name, name)) return .{ .possible = id };
+            if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return .{ .possible = id };
         }
         return null;
     }

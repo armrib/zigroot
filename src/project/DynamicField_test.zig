@@ -32,7 +32,7 @@ test "@field(Foo, \"bar\") resolves to Foo's bar export at .possible confidence"
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
     const bar_id = sem.symbols.getSymbolNamed("bar").?;
 
-    const resolution = DynamicField.resolve(&sem, foo_id, fooReference(&sem, foo_id)).?;
+    const resolution = DynamicField.resolve(&sem, &sem, foo_id, fooReference(&sem, foo_id)).?;
     try t.expectEqual(bar_id, resolution.possible);
 }
 
@@ -51,7 +51,7 @@ test "@field(Foo, name) with a runtime name resolves to every export of Foo" {
     const bar_id = sem.symbols.getSymbolNamed("bar").?;
     const baz_id = sem.symbols.getSymbolNamed("baz").?;
 
-    const resolution = DynamicField.resolve(&sem, foo_id, fooReference(&sem, foo_id)).?;
+    const resolution = DynamicField.resolve(&sem, &sem, foo_id, fooReference(&sem, foo_id)).?;
     const exports = resolution.unknown;
     try t.expectEqual(@as(usize, 2), exports.len);
     try t.expect(std.mem.indexOfScalar(Semantic.Symbol.Id, exports, bar_id) != null);
@@ -69,5 +69,5 @@ test "a plain field access (not @field) is not resolved by DynamicField" {
     defer sem.deinit();
 
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
-    try t.expectEqual(@as(?DynamicField.Resolution, null), DynamicField.resolve(&sem, foo_id, fooReference(&sem, foo_id)));
+    try t.expectEqual(@as(?DynamicField.Resolution, null), DynamicField.resolve(&sem, &sem, foo_id, fooReference(&sem, foo_id)));
 }

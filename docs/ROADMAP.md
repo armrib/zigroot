@@ -193,6 +193,32 @@ Added `src/project/FieldChain.zig`, shared by `SymbolGraph` (same-file) and
 - CLI: `--build-zig <build.zig>` flag, optional. Without it, named-module
   imports are unresolved as before (this phase is additive).
 
+## Phase 12 — Cross-file `@field` resolution (done)
+
+Phase 9's `DynamicField` only resolved `@field(Foo, name)` within one file;
+a reference to an `@import` binding used as `@field`'s container argument
+(`@field(storage, "start")`) fell through `Resolver`'s field-access-only
+check and was silently dropped, unlike the same construct spelled
+`storage.start()`.
+
+- `DynamicField.resolve` now takes `ast` and `symbols` as separate
+  `Semantic`s (mirroring `FieldChain.resolve`'s split): `ast` is where the
+  `@field(...)` call and its node structure live (the referencing file),
+  `symbols`/`container` is where the field name is matched against
+  `Symbol.exports`. Same-file callers (`SymbolGraph`) pass one `Semantic`
+  for both, `container` = the referenced symbol. `Resolver` passes the
+  source file's `Semantic` as `ast` and the target file's `Semantic` with
+  `FILE_ROOT_SYMBOL` as `symbols`/`container` — the same target-side
+  handles `Resolver` already uses for the plain `storage.start()` hop.
+- `Resolver.build`: a binding reference that isn't a field-access base now
+  falls through to `DynamicField.resolve` instead of being skipped,
+  producing a `.possible` edge (comptime-known name) or `.unknown` edges to
+  every export (runtime name) into the target file — same confidence
+  levels as the same-file case.
+- Doesn't chain further after the `@field` hop (matching same-file
+  `DynamicField`'s scope), and doesn't handle `@field` nested inside
+  another resolved hop (e.g. through `FieldChain`-resolved containers).
+
 ## Later / not scheduled
 
 - Per-target file sets (e.g. `linux.zig` vs `windows.zig` selected by
