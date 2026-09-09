@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-14. Implemented so far:
+Status: Phase 0-15. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -73,14 +73,18 @@ Status: Phase 0-14. Implemented so far:
   explicit type annotation or a typed struct-literal initializer) to that
   type's symbol, so `var s: Foo = ...; s.run();` reaches `Foo`'s `run` the
   same way `Foo.run()` does — not real type inference, just reading what's
-  already written down. Same-file only so far (`src/project/InstanceType.zig`,
-  wired into `SymbolGraph`).
+  already written down (`src/project/InstanceType.zig`, wired into
+  `SymbolGraph`). `Resolver` extends this across an `@import` boundary too:
+  `var s: storage.Widget = ...; s.run();` resolves `storage.Widget` into the
+  target file's exports the same way `storage.foo()` does, then chains `s`'s
+  own references the same way.
 
-Not yet implemented: instance types crossing an `@import` boundary (`var s:
-storage.Widget = ...`), a value's type inferred from a function call or
-parameter rather than spelled out locally, per-target file sets in
-`build.zig` (e.g. `linux.zig` vs `windows.zig` chosen by target). See
-`docs/ROADMAP.md` for the full phase plan.
+Not yet implemented: an instance type named through a same-file chain
+*before* crossing an `@import` boundary (`var s: mod.storage.Widget =
+...`), a value's type inferred from a function call or parameter rather
+than spelled out locally, per-target file sets in `build.zig` (e.g.
+`linux.zig` vs `windows.zig` chosen by target). See `docs/ROADMAP.md` for
+the full phase plan.
 
 ## Build
 

@@ -4,12 +4,10 @@
 //! chains, scans a directory for `.zig` files that no root ever reaches
 //! ("orphan files"), then reports declarations unreachable from any root
 //! (`executable_entry`'s `main`, or `export`ed symbols) via `SymbolGraph`
-//! reachability (Phase 5) plus cross-file `@import` edges (Phase 6). Only
-//! the `binding.member` shape resolves across files so far; same-file
-//! `Foo.bar()` (Phase 7) and same-file instance-method calls on a
-//! locally-typed variable (Phase 14) resolve too, but an instance type that
-//! crosses an `@import` boundary doesn't yet, so a symbol only reached that
-//! way is still reported dead here.
+//! reachability (Phase 5) plus cross-file `@import` edges (Phase 6),
+//! including `Foo.bar()` (Phase 7) and instance-method calls on a
+//! locally-typed variable (Phase 14), both same-file and across an
+//! `@import` boundary (Phase 15).
 
 const std = @import("std");
 const zigroot = @import("zigroot");

@@ -98,6 +98,101 @@ test "storage.Inner.run() chains a cross-file edge through a nested container" {
     try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = run_sym }));
 }
 
+test "s.run() on a cross-file-typed variable produces a cross-file .possible edge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    var s: storage.Widget = undefined;
+        \\    s.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub const Widget = struct {
+        \\    pub fn run(self: *Widget) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const main_id = try project.addRoot(root_path);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    const main_semantic = &project.file(main_id).semantic;
+    const main_sym = main_semantic.symbols.getSymbolNamed("main").?;
+
+    const storage_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
+    } else unreachable;
+    const run_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("run").?;
+
+    const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
+    var found: ?SymbolGraph.Target = null;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = storage_id, .local = run_sym })) found = edge;
+    }
+    try t.expect(found != null);
+    try t.expectEqual(SymbolGraph.EdgeKind.possible, found.?.kind);
+}
+
+test "a symbol only reachable via a cross-file-typed variable's instance method is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    var s: storage.Widget = undefined;
+        \\    s.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub const Widget = struct {
+        \\    pub fn run(self: *Widget) void { _ = self; }
+        \\    pub fn unused(self: *Widget) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const storage_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
+    } else unreachable;
+    const storage_semantic = &project.file(storage_id).semantic;
+    const run_sym = storage_semantic.symbols.getSymbolNamed("run").?;
+    const unused_sym = storage_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = storage_id, .local = run_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
+}
+
 test "@field(storage, \"start\") produces a cross-file .possible edge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

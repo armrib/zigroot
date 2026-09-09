@@ -277,10 +277,41 @@ syntax — not real type inference, just reading what's already written down:
   alongside the existing chain starting from the variable itself (which
   still resolves nothing new, since a plain variable has no exports) — so
   `s.run()` reaches `Foo.run` the same way `Foo.run()` would.
-- Scoped to `SymbolGraph` (same-file) only. `Resolver` (cross-file) and
-  `Roots`' `.test`-root case don't call `InstanceType` yet — an
-  `@import`-crossing instance type (`var s: storage.Widget = ...;`) is still
-  unresolved.
+- Scoped to `SymbolGraph` (same-file) only when first landed. `Resolver`
+  (cross-file) and `Roots`' `.test`-root case didn't call `InstanceType`
+  yet — an `@import`-crossing instance type (`var s: storage.Widget =
+  ...;`) was still unresolved.
+
+## Phase 15 — Cross-file instance types (done)
+
+Phase 14 only resolved a variable's declared type when it stayed within one
+file; `var s: storage.Widget = ...; s.run();` (`storage` an `@import`
+binding) fell through, same shape of gap Phase 6 filled for static
+`container.member` access.
+
+- `InstanceType.crossFileRoot`: the other half of `InstanceType.resolve`.
+  When a variable's type expression is a single `base.field` hop off a
+  plain identifier and `resolve` couldn't resolve it same-file (the
+  `base.field` shape doesn't match anything in `base`'s same-file exports —
+  the telltale sign `base` is an `@import` binding rather than a
+  container), hands back the unresolved `(base, field)` pair. Doesn't check
+  that `base` really is an `@import` binding itself — `InstanceType` only
+  has one file's `Semantic` to work with, no `Project`, so it can't; that
+  check is `Resolver`'s job.
+- `Resolver.buildInstanceTypes`: for every variable `InstanceType.resolve`
+  can't place, takes `crossFileRoot`'s `(base, field)`, confirms `base` is
+  actually one of the file's `@import` bindings via the same "nearest
+  enclosing declaration of the `@import(...)` call" trick the main
+  `Resolver.build` loop uses, then `FieldChain.findExport`s `field` against
+  the target file's exports — same as `storage.foo()` resolves in the main
+  loop, just triggered from a variable's type annotation instead of a
+  direct member-access reference. Once the type resolves, every reference
+  to the variable used as a field access chains into the target file via
+  `FieldChain.resolveChain`, at `.possible` confidence (same as the
+  same-file case).
+- Still one hop only: `var s: mod.storage.Widget = ...` (a same-file chain
+  before the `@import` crossing) isn't attempted, matching `crossFileRoot`'s
+  "single field-access hop off a plain identifier" scope.
 
 ## Later / not scheduled
 

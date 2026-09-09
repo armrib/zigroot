@@ -16,6 +16,15 @@
 //! variable's declared type resolves to a symbol, `FieldChain.findExport`
 //! already finds its instance methods; the only missing piece is that
 //! resolution itself.
+//!
+//! `resolve` only resolves a type expression that stays within one file.
+//! `crossFileRoot` is the other half, for `Resolver`: when the type
+//! expression's root identifier doesn't resolve to anything with the
+//! expected field as an export (`storage.Widget`, where `storage` is an
+//! `@import` binding rather than a container), it hands back the
+//! unresolved `(base, field)` pair so `Resolver` — which has the `Project`
+//! needed to tell an `@import` binding from any other symbol, and to reach
+//! the target file's exports — can finish the lookup.
 
 const std = @import("std");
 const zlint = @import("zlint");
@@ -63,6 +72,50 @@ fn resolveTypeExpr(semantic: *const Semantic, node: Ast.Node.Index) ?Semantic.Sy
         },
         else => null,
     };
+}
+
+pub const CrossFileRoot = struct {
+    /// The same-file symbol the type expression's root identifier
+    /// resolves to — expected to be an `@import` binding, though this
+    /// doesn't check that itself (it has no `Project` to check it against).
+    base: Semantic.Symbol.Id,
+    /// The field name hopped off `base` (`storage.Widget` -> `"Widget"`).
+    field: []const u8,
+};
+
+/// If `sym_id`'s declared type expression (the same shapes `resolve` looks
+/// at: an explicit type annotation or a typed struct-literal initializer)
+/// is a single `base.field` hop off a plain identifier, that `(base,
+/// field)` pair — regardless of whether `base.field` resolves same-file.
+/// `resolve` already covers the case where it does; this is for a caller
+/// (`Resolver`) that can check whether `base` is an `@import` binding and
+/// continue the lookup into the target file's exports for the case where
+/// it doesn't (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
+pub fn crossFileRoot(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+
+    if (decl.ast.type_node.unwrap()) |type_node| {
+        if (fieldAccessRoot(semantic, type_node)) |root| return root;
+    }
+
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    var buf: [2]Ast.Node.Index = undefined;
+    const struct_init = ast.fullStructInit(&buf, init_node) orelse return null;
+    const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
+    return fieldAccessRoot(semantic, type_expr);
+}
+
+fn fieldAccessRoot(semantic: *const Semantic, node: Ast.Node.Index) ?CrossFileRoot {
+    const ast = &semantic.parse.ast;
+    if (ast.nodeTag(node) != .field_access) return null;
+    const data = ast.nodeData(node).node_and_token;
+    if (ast.nodeTag(data[0]) != .identifier) return null;
+    const base = referenceAt(semantic, data[0]) orelse return null;
+    return .{ .base = base, .field = semantic.tokenSlice(data[1]) };
 }
 
 /// The symbol the `Reference` recorded at exactly `node` resolves to, if

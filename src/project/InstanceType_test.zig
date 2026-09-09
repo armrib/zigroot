@@ -88,6 +88,41 @@ test "a variable with no statically-named type resolves to null" {
     try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, s_id));
 }
 
+test "crossFileRoot finds the base and field of a single field-access type annotation" {
+    var sem = try build(
+        \\const storage = 0;
+        \\fn a() void {
+        \\    var s: storage.Widget = undefined;
+        \\    _ = &s;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    const storage_id = sem.symbols.getSymbolNamed("storage").?;
+    const s_id = sem.symbols.getSymbolNamed("s").?;
+    const root = InstanceType.crossFileRoot(&sem, s_id).?;
+    try t.expectEqual(storage_id, root.base);
+    try t.expectEqualStrings("Widget", root.field);
+}
+
+test "crossFileRoot returns null for a bare identifier type (not a field-access chain)" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn run(self: *Foo) void { _ = self; }
+        \\};
+        \\fn a() void {
+        \\    var s: Foo = undefined;
+        \\    _ = &s;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    const s_id = sem.symbols.getSymbolNamed("s").?;
+    try t.expectEqual(@as(?InstanceType.CrossFileRoot, null), InstanceType.crossFileRoot(&sem, s_id));
+}
+
 test "a non-variable symbol resolves to null" {
     var sem = try build(
         \\const Foo = struct {};

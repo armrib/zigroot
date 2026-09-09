@@ -12,8 +12,7 @@
 //! After that first hop, Phase 7's `FieldChain` continues resolving further
 //! `container.member` hops entirely within the target file (e.g.
 //! `storage.Inner.run()`), so static-member access chains through an
-//! `@import` boundary too. Instance-method calls still aren't attempted —
-//! that needs real type inference.
+//! `@import` boundary too.
 //!
 //! Phase 12: a reference to the binding used as the container argument of
 //! `@field(storage, name)` is resolved the same way, via `DynamicField`
@@ -26,6 +25,13 @@
 //! and `@field(...)` hops keep interleaving past the boundary too —
 //! `storage.field("Bar").baz` or `@field(storage, "Inner").run()` chain as
 //! far as they resolve, same as the same-file case in `SymbolGraph`.
+//!
+//! Phase 15: `InstanceType`'s same-file variable-type resolution
+//! (`var s: Foo = ...; s.run();`) gets the same cross-file treatment —
+//! `var s: storage.Widget = ...; s.run();` resolves `storage.Widget` into
+//! the target file's exports the same way `storage.start()` does above,
+//! then chains `s`'s own references the same way `FieldChain` does for the
+//! same-file case.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -38,6 +44,7 @@ const SymbolId = @import("SymbolId.zig").SymbolId;
 const SymbolGraph = @import("SymbolGraph.zig");
 const FieldChain = @import("FieldChain.zig");
 const DynamicField = @import("DynamicField.zig");
+const InstanceType = @import("InstanceType.zig");
 
 /// Every file's top-level declarations are exported from this symbol.
 /// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
@@ -81,7 +88,56 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
         }
     }
 
+    try buildInstanceTypes(gpa, &graph, project);
+
     return graph;
+}
+
+/// Phase 15: `var s: storage.Widget = ...; s.run();`, where `storage` is an
+/// `@import` binding — `InstanceType.resolve` only resolves a type
+/// expression that stays within one file, so `s`'s declared type
+/// (`storage.Widget`) is invisible to it. For every variable that's true
+/// of, `InstanceType.crossFileRoot` hands back the unresolved `(base,
+/// field)` pair; `importTarget` checks whether `base` really is one of this
+/// file's `@import` bindings (same "nearest enclosing declaration of the
+/// `@import(...)` call" trick the main loop above uses), and if so,
+/// `FieldChain.findExport` matches `field` against the target file's
+/// exports, same as `storage.foo` resolves above. Once the type itself
+/// resolves, every reference to the variable used as a field access
+/// (`s.run()`) chains into the target file via `FieldChain.resolveChain`,
+/// same as the same-file case in `SymbolGraph`.
+fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        const semantic = &file.semantic;
+
+        var sym_it = semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            if (InstanceType.resolve(semantic, sym_id) != null) continue;
+            const root = InstanceType.crossFileRoot(semantic, sym_id) orelse continue;
+
+            const target_file = importTarget(project, file.id, root.base) orelse continue;
+            const target_semantic = &project.file(target_file).semantic;
+            const ty = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, root.field) orelse continue;
+
+            var ref_it = semantic.symbols.iterReferences(sym_id);
+            while (ref_it.next()) |ref| {
+                const owner = file.owner_map.get(ref.node) orelse continue;
+                const owner_id: SymbolId = .{ .file = file.id, .local = owner };
+                try addChain(graph, gpa, owner_id, target_file, semantic, target_semantic, ty, ref.node, .possible);
+            }
+        }
+    }
+}
+
+/// The target file of one of `file_id`'s `@import` edges whose binding
+/// symbol is `base`, if any.
+fn importTarget(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?FileId {
+    for (project.import_graph.edges.items) |edge| {
+        if (edge.from != file_id) continue;
+        const binding = project.file(edge.from).owner_map.get(edge.node) orelse continue;
+        if (binding == base) return edge.to;
+    }
+    return null;
 }
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
