@@ -5,8 +5,10 @@
 //! ("orphan files"), then reports declarations unreachable from any root
 //! (`executable_entry`'s `main`, or `export`ed symbols) via `SymbolGraph`
 //! reachability (Phase 5) plus cross-file `@import` edges (Phase 6). Only
-//! the `binding.member` shape resolves across files so far; `Foo.bar()`
-//! and instance-method calls are Phase 7+, so a symbol only reached that
+//! the `binding.member` shape resolves across files so far; same-file
+//! `Foo.bar()` (Phase 7) and same-file instance-method calls on a
+//! locally-typed variable (Phase 14) resolve too, but an instance type that
+//! crosses an `@import` boundary doesn't yet, so a symbol only reached that
 //! way is still reported dead here.
 
 const std = @import("std");

@@ -123,6 +123,38 @@ test "Outer.Inner.run() chains through two nested containers" {
     try t.expect(found_run);
 }
 
+test "s.run() on an explicitly-typed variable edges to the type's run at .possible confidence" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn run(self: *Foo) void { _ = self; }
+        \\};
+        \\fn a() void {
+        \\    var s: Foo = undefined;
+        \\    s.run();
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const run_id = sem.symbols.getSymbolNamed("run").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var found: ?SymbolGraph.Target = null;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = run_id })) found = edge;
+    }
+    try t.expect(found != null);
+    try t.expectEqual(SymbolGraph.EdgeKind.possible, found.?.kind);
+}
+
 test "@field(Foo, \"Bar\").baz() chains from the @field hop into a further .field hop" {
     var sem = try build(
         \\const Foo = struct {

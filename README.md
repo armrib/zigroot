@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-13. Implemented so far:
+Status: Phase 0-14. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -69,10 +69,18 @@ Status: Phase 0-13. Implemented so far:
   `@field` being a one-hop dead end — both same-file (`SymbolGraph`) and
   across an `@import` boundary (`Resolver`) (`src/project/FieldChain.zig`).
 
-Not yet implemented: instance-method resolution (needs real type
-inference), per-target file sets in `build.zig` (e.g. `linux.zig` vs
-`windows.zig` chosen by target). See `docs/ROADMAP.md` for the full phase
-plan.
+- `InstanceType`: resolves a variable's syntactically-declared type (an
+  explicit type annotation or a typed struct-literal initializer) to that
+  type's symbol, so `var s: Foo = ...; s.run();` reaches `Foo`'s `run` the
+  same way `Foo.run()` does — not real type inference, just reading what's
+  already written down. Same-file only so far (`src/project/InstanceType.zig`,
+  wired into `SymbolGraph`).
+
+Not yet implemented: instance types crossing an `@import` boundary (`var s:
+storage.Widget = ...`), a value's type inferred from a function call or
+parameter rather than spelled out locally, per-target file sets in
+`build.zig` (e.g. `linux.zig` vs `windows.zig` chosen by target). See
+`docs/ROADMAP.md` for the full phase plan.
 
 ## Build
 
@@ -120,6 +128,7 @@ src/
     Resolver.zig              cross-file Symbol -> Symbol edges via @import
     FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution
     DynamicField.zig          @field(Foo, name) resolution (comptime + runtime name)
+    InstanceType.zig          locally-typed variable -> declared-type symbol resolution
     Scc.zig                   Tarjan SCC over the declaration graph
     BuildGraph.zig            build.zig module-name -> file resolution
   main.zig                    CLI

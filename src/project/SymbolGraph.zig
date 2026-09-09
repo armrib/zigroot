@@ -20,6 +20,7 @@ const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
+const InstanceType = @import("InstanceType.zig");
 const Semantic = zlint.Semantic;
 
 const SymbolGraph = @This();
@@ -91,12 +92,23 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// comptime-known `@field` hop is taken. A runtime-named `@field` hop can't
 /// be chased further — every export of the container at that point becomes
 /// an `.unknown` edge instead.
+///
+/// Phase 14: if the referenced symbol is a variable whose declared type
+/// `InstanceType.resolve` can name (an explicit type annotation or a typed
+/// struct-literal initializer), the same chain-walk also runs starting from
+/// that type instead of the variable itself, at `.possible` confidence —
+/// `var s: Foo = ...; s.run();` reaches `Foo.run`, since ZLint's exports
+/// already include instance methods (it doesn't yet separate them from
+/// static ones). Skipped when `InstanceType.resolve` can't determine a
+/// type, e.g. a variable initialized from a function's return value.
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
 
     var sym_it = semantic.symbols.iter();
     while (sym_it.next()) |sym_id| {
+        const instance_ty = InstanceType.resolve(semantic, sym_id);
+
         var ref_it = semantic.symbols.iterReferences(sym_id);
         while (ref_it.next()) |ref| {
             const owner = owner_map.get(ref.node) orelse continue;
@@ -114,6 +126,16 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             if (chain.unknown) |unknown| for (unknown.exports) |target| {
                 try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);
             };
+
+            if (instance_ty) |ty| {
+                const inst_chain = FieldChain.resolveChain(semantic, semantic, ty, ref.node, .possible);
+                if (inst_chain.result.symbol != ty) {
+                    try graph.addEdge(gpa, owner_id, .{ .file = file, .local = inst_chain.result.symbol }, inst_chain.result.node, .possible);
+                }
+                if (inst_chain.unknown) |unknown| for (unknown.exports) |target| {
+                    try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);
+                };
+            }
         }
     }
 

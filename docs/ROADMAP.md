@@ -248,6 +248,40 @@ at all (`Outer.Inner`'s field-access node was never offered to
   when it crossed via `@field(storage, "field")`, then keeps resolving
   further `.field`/`@field` hops within the target file either way.
 
+## Phase 14 — Instance-method calls on locally-typed variables (done)
+
+`FieldChain`/`Resolver` only ever resolved `container.member` where
+`container` was itself a container symbol (`Foo.bar()`); `var s: Foo = ...;
+s.run();` stopped dead, since `s` is a variable with no exports of its own —
+noted as needing "real type inference" since Phase 7.
+
+Turns out ZLint doesn't yet distinguish `self`-taking instance methods from
+static functions declared in a container (`Symbol.zig`'s "TODO: bind methods
+as members" — unimplemented), so both already land in `Symbol.exports`. The
+only missing piece was resolving a variable's *declared* type from its own
+syntax — not real type inference, just reading what's already written down:
+
+- `src/project/InstanceType.zig`: `resolve(semantic, sym_id)` — if `sym_id`
+  is a variable with an explicit type annotation (`var s: Foo = ...`) or an
+  explicitly-typed struct-literal initializer (`var s = Foo{...}`), the
+  symbol that type expression names. The type expression is resolved by
+  finding the `Reference` ZLint already recorded for it (keyed by node, no
+  index existed for this so it's a linear scan over the file's references)
+  and, for a `.field` chain (`Outer.Inner`), recursing through
+  `FieldChain.findExport`. `null` for anything else — pointer types,
+  optionals, generic instantiations, a value returned from a call, or a type
+  that crosses an `@import` boundary.
+- `SymbolGraph.build`: for each symbol reference, if `InstanceType.resolve`
+  names a type, `FieldChain.resolveChain` also runs starting from that type
+  (seeded at `.possible`, since it's a heuristic rather than a proven type),
+  alongside the existing chain starting from the variable itself (which
+  still resolves nothing new, since a plain variable has no exports) — so
+  `s.run()` reaches `Foo.run` the same way `Foo.run()` would.
+- Scoped to `SymbolGraph` (same-file) only. `Resolver` (cross-file) and
+  `Roots`' `.test`-root case don't call `InstanceType` yet — an
+  `@import`-crossing instance type (`var s: storage.Widget = ...;`) is still
+  unresolved.
+
 ## Later / not scheduled
 
 - Per-target file sets (e.g. `linux.zig` vs `windows.zig` selected by
