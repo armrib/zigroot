@@ -1,6 +1,6 @@
 # Roadmap
 
-Phase 0-4 are done (see README.md). This tracks what's left to get from
+Phase 0-5 are done (see README.md). This tracks what's left to get from
 "file-level orphan detection" to "declaration-level dead-code analysis
 across a whole project".
 
@@ -46,13 +46,18 @@ build `SymbolId -> SymbolId` edges for references within one file.
   `owner_map`.
 - Test case: `fn a() void { b(); } fn b() void {}` produces edge `a -> b`.
 
-## Phase 5 — Roots and reachability
+## Phase 5 — Roots and reachability (done)
 
-- `src/project/Roots.zig`: `RootKind = enum { executable_entry, test, export, public_api, configured }`.
-  MVP: only `executable_entry` (from `--root`'s `main`) and `.export` (symbols
-  with `s_export` flag, already tracked by ZLint).
-- `src/project/Reachability.zig`: BFS/DFS over `SymbolGraph` from roots,
-  `O(V+E)`.
+- `src/project/Roots.zig`: `RootKind = enum { executable_entry, @"test", @"export", public_api, configured }`.
+  MVP: only `executable_entry` (each `--root` file's top-level `main`) and
+  `.export` (symbols with the `s_export` flag, already tracked by ZLint) are
+  populated; `Roots.build` walks `Project.roots` and every loaded file's
+  symbol table.
+- `src/project/Reachability.zig`: BFS over `SymbolGraph` from `Roots`,
+  `O(V+E)`, via `Project.file(id).symbol_graph.outgoing`.
+  `Reachability.deadSymbols` returns every declared symbol the BFS never
+  reached.
+- `main.zig` reports dead declarations after orphan-file detection.
 - This is the first phase that produces genuine dead-code output:
 
   ```
@@ -63,7 +68,8 @@ build `SymbolId -> SymbolId` edges for references within one file.
 
   → `dead_a`, `dead_b` unreachable, even though `dead_b` has a reference
   (the bug in ZLint's existing `unused-decls` this whole project works
-  around).
+  around). Same-file scoped, like `SymbolGraph`: a symbol only used across
+  a `@import` boundary is still reported dead until Phase 6.
 
 ## Phase 6 — Cross-file imports
 

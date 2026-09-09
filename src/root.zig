@@ -9,6 +9,8 @@ pub const ImportGraph = @import("project/ImportGraph.zig");
 pub const OwnerMap = @import("project/OwnerMap.zig");
 pub const SymbolGraph = @import("project/SymbolGraph.zig");
 pub const SymbolId = @import("project/SymbolId.zig").SymbolId;
+pub const Roots = @import("project/Roots.zig");
+pub const Reachability = @import("project/Reachability.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -18,4 +20,6 @@ test {
     _ = @import("Project_test.zig");
     _ = @import("project/OwnerMap_test.zig");
     _ = @import("project/SymbolGraph_test.zig");
+    _ = @import("project/Roots_test.zig");
+    _ = @import("project/Reachability_test.zig");
 }

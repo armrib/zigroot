@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-4. Implemented so far:
+Status: Phase 0-5. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -26,11 +26,17 @@ Status: Phase 0-4. Implemented so far:
   mapping every symbol's already-resolved incoming references through
   `OwnerMap` (`src/project/SymbolGraph.zig`). `File` builds one alongside
   its `semantic` and `OwnerMap`.
+- `Roots`: automatic reachability roots — each `--root` file's `main`
+  (`executable_entry`) and every `export`ed symbol (`.export`)
+  (`src/project/Roots.zig`).
+- `Reachability`: BFS over `SymbolGraph` from `Roots`; `deadSymbols` lists
+  every declared symbol the BFS never reaches (`src/project/Reachability.zig`).
+  The CLI reports these after orphan-file detection.
 
-Not yet implemented: reachability analysis that turns `SymbolGraph` into
-actual dead-code output, cross-file member resolution
-(`storage.start()`), roots beyond explicit `--root` (tests, exports, `pub`
-policy), SCC reporting. See `docs/ROADMAP.md` for the full phase plan.
+Not yet implemented: cross-file member resolution (`storage.start()`),
+roots beyond `main`/`export` (tests, `pub` policy), confidence levels for
+unresolved edges, SCC reporting. See `docs/ROADMAP.md` for the full phase
+plan.
 
 ## Build
 
@@ -68,6 +74,8 @@ src/
     SymbolId.zig              project-wide symbol identity
     OwnerMap.zig              node -> containing-declaration map
     SymbolGraph.zig           same-file Symbol -> Symbol reference edges
+    Roots.zig                 automatic reachability roots (main, export)
+    Reachability.zig          BFS over SymbolGraph from Roots
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```
