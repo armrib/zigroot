@@ -61,6 +61,29 @@ test "follows @import chains and finds orphan files" {
     try t.expect(std.mem.endsWith(u8, orphan_path.?, "old_experiment.zig"));
 }
 
+test "Project.symbol resolves a SymbolId to its ZLint symbol" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\pub fn main() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+    const semantic = &project.file(file_id).semantic;
+    const local_id = semantic.symbols.getSymbolNamed("main").?;
+
+    const sym = project.symbol(.{ .file = file_id, .local = local_id });
+    try t.expectEqualStrings("main", sym.name);
+}
+
 test "unresolved module imports are recorded, not treated as errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

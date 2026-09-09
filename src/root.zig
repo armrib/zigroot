@@ -6,6 +6,7 @@ pub const zlint = @import("zlint");
 pub const FileId = @import("project/FileId.zig").FileId;
 pub const File = @import("project/File.zig");
 pub const ImportGraph = @import("project/ImportGraph.zig");
+pub const SymbolId = @import("project/SymbolId.zig").SymbolId;
 pub const Project = @import("Project.zig");
 
 test {
