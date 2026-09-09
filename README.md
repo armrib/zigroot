@@ -84,10 +84,12 @@ Status: Phase 0-16. Implemented so far:
 
 Not yet implemented: an instance type named through a same-file chain
 *before* crossing an `@import` boundary (`var s: mod.storage.Widget =
-...`), a value's type inferred from a function call or parameter rather
-than spelled out locally, per-target file sets in `build.zig` (e.g.
-`linux.zig` vs `windows.zig` chosen by target). See `docs/ROADMAP.md` for
-the full phase plan.
+...`), a value's type inferred from a function parameter (`self.run()`
+inside a method taking `self: *Foo`) rather than spelled out locally,
+a nested `const Self = @This();` alias (only the file-top-level case
+resolves), per-target file sets in `build.zig` (e.g. `linux.zig` vs
+`windows.zig` chosen by target), and a few other gaps found by running
+against a real codebase. See `issues/` for the full list.
 
 ## Build
 
