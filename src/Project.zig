@@ -15,6 +15,7 @@ const zlint = @import("zlint");
 const FileId = @import("project/FileId.zig").FileId;
 const File = @import("project/File.zig");
 const ImportGraph = @import("project/ImportGraph.zig");
+const SymbolId = @import("project/SymbolId.zig").SymbolId;
 
 const Project = @This();
 
@@ -40,6 +41,11 @@ pub fn deinit(self: *Project) void {
 
 pub fn file(self: *const Project, id: FileId) *const File {
     return &self.files.items[id.index()];
+}
+
+/// Resolves a project-wide `SymbolId` to the ZLint symbol it identifies.
+pub fn symbol(self: *const Project, id: SymbolId) *const zlint.Semantic.Symbol {
+    return self.file(id.file).semantic.symbols.get(id.local);
 }
 
 /// True iff some configured root transitively imports `path`. Only
