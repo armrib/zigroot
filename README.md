@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-8. Implemented so far:
+Status: Phase 0-10. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -48,9 +48,15 @@ Status: Phase 0-8. Implemented so far:
   and across an `@import` boundary (`Resolver`) — no type inference, just
   container graph traversal (`src/project/FieldChain.zig`).
 
+- `Scc`: Tarjan's algorithm over the same edges `Reachability` trusts, so a
+  cycle of mutually-referencing-but-globally-dead declarations is reported
+  as one finding instead of N (`src/project/Scc.zig`). The CLI groups a
+  dead symbol's whole cyclic component into one `cycle of N
+  declaration(s)...` report.
+
 Not yet implemented: instance-method resolution (needs real type
-inference), confidence levels for unresolved edges, SCC reporting. See
-`docs/ROADMAP.md` for the full phase plan.
+inference), `build.zig` module graph integration. See `docs/ROADMAP.md`
+for the full phase plan.
 
 ## Build
 
@@ -94,6 +100,8 @@ src/
     Reachability.zig          BFS over SymbolGraph + Resolver edges from Roots
     Resolver.zig              cross-file Symbol -> Symbol edges via @import
     FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution
+    DynamicField.zig          @field(Foo, name) resolution (comptime + runtime name)
+    Scc.zig                   Tarjan SCC over the declaration graph
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```

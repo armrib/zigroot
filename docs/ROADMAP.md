@@ -153,10 +153,27 @@ Added `src/project/FieldChain.zig`, shared by `SymbolGraph` (same-file) and
   `--include-possible` widens it to include the uncertain ones too,
   annotated in the output.
 
+## Phase 10 — SCC condensation (done)
+
+- `src/project/Scc.zig`: Tarjan's algorithm over the same edge set
+  `Reachability`'s BFS trusts (`.definite`/`.possible` from each file's
+  `SymbolGraph` plus `Resolver`'s cross-file edges; `.unknown` excluded, for
+  the same reason `Reachability` excludes it — a guessed edge shouldn't
+  merge an uncertain target into a component of provably-dead code).
+  `component_of` maps every symbol to its `ComponentId`; `members` lists a
+  component's symbols; `isCyclic` reports whether the component is a real
+  cycle rather than an isolated node — a plain Tarjan run can't tell those
+  apart for a singleton component, so a second O(E) pass over every edge
+  flags a component whose member has an edge (including a self-loop) back
+  into the same component.
+- `main.zig`: when a dead symbol's component `isCyclic`, its whole
+  component is reported once (`cycle of N declaration(s), unreachable from
+  any root:` followed by each member), instead of once per member.
+  Non-cyclic singleton components still report individually, unchanged
+  from Phase 9.
+
 ## Later / not scheduled
 
-- SCC condensation (Tarjan) for reporting dead reference cycles as one
-  finding instead of N.
 - Real `build.zig` module graph integration instead of `--root` flags, so
   `@import("some_dep")` and per-target file sets (e.g. `linux.zig` vs
   `windows.zig`) resolve correctly.

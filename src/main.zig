@@ -141,11 +141,34 @@ pub fn main() !u8 {
     var dead = try reachability.deadSymbols(gpa, &project);
     defer dead.deinit(gpa);
 
+    var scc = try zigroot.Scc.build(gpa, &project, &cross_file);
+    defer scc.deinit(gpa);
+
+    var reported_cycles: std.AutoHashMapUnmanaged(zigroot.Scc.ComponentId, void) = .empty;
+    defer reported_cycles.deinit(gpa);
+
     var reported: usize = 0;
     for (dead.items) |d| {
         if (d.possible and !opts.include_possible) continue;
         const name = project.symbol(d.id).name;
         if (name.len == 0) continue;
+
+        if (scc.componentOf(d.id)) |component| {
+            if (scc.isCyclic(component)) {
+                if (reported_cycles.contains(component)) continue;
+                try reported_cycles.put(gpa, component, {});
+                if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
+                reported += 1;
+                std.debug.print("  cycle of {d} declaration(s), unreachable from any root:\n", .{scc.members(component).len});
+                for (scc.members(component)) |member| {
+                    const member_name = project.symbol(member).name;
+                    if (member_name.len == 0) continue;
+                    std.debug.print("    {s}: {s}\n", .{ project.file(member.file).path, member_name });
+                }
+                continue;
+            }
+        }
+
         if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
         reported += 1;
         std.debug.print("  {s}: {s}{s}\n", .{

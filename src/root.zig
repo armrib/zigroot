@@ -13,6 +13,7 @@ pub const Roots = @import("project/Roots.zig");
 pub const Reachability = @import("project/Reachability.zig");
 pub const Resolver = @import("project/Resolver.zig");
 pub const DynamicField = @import("project/DynamicField.zig");
+pub const Scc = @import("project/Scc.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -26,4 +27,5 @@ test {
     _ = @import("project/Reachability_test.zig");
     _ = @import("project/Resolver_test.zig");
     _ = @import("project/DynamicField_test.zig");
+    _ = @import("project/Scc_test.zig");
 }
