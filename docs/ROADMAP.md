@@ -219,6 +219,35 @@ check and was silently dropped, unlike the same construct spelled
   `DynamicField`'s scope), and doesn't handle `@field` nested inside
   another resolved hop (e.g. through `FieldChain`-resolved containers).
 
+## Phase 13 — Interleaved `.field` / `@field(...)` chaining (done)
+
+Phase 12 crossed the `@import` boundary with `@field`, but `DynamicField`
+still only resolved one hop: `@field(Foo, "Bar").baz()` stopped at `Bar`
+(no further `.field` hop), and `@field(Outer.Inner, "run")` never resolved
+at all (`Outer.Inner`'s field-access node was never offered to
+`DynamicField` as an `@field` container argument).
+
+- `FieldChain.resolveChain` replaces the old `FieldChain.resolve`: a single
+  walk that tries a static `.field` hop first, falls back to a
+  `DynamicField` `@field(...)` hop on the same node, and keeps going either
+  way — so the two hop kinds interleave freely instead of `DynamicField`
+  being a one-shot, dead-ending detour. Takes a starting `EdgeKind`-shaped
+  `Kind` (`definite`/`possible`) so a caller that already crossed a
+  less-certain hop (e.g. `Resolver`'s own `@field` boundary crossing) can
+  seed the chain at `.possible`; a comptime-known `@field` hop downgrades to
+  `.possible` for the rest of the chain, and a runtime-named `@field` hop
+  still ends the chain (returned separately as `.unknown`, one edge per
+  export of the container at that point) since it forks into multiple
+  targets `resolveChain` can't keep chasing as one path.
+- `SymbolGraph.build`, `Resolver.build`, and `Roots.build` (the `.test`-root
+  case) all call `resolveChain` instead of separately calling the old
+  `FieldChain.resolve` then `DynamicField.resolve` on the same un-chained
+  starting node.
+- `Resolver.build` seeds the chain at `.definite` when the `@import`
+  boundary itself crossed via a plain `storage.field` hop, or `.possible`
+  when it crossed via `@field(storage, "field")`, then keeps resolving
+  further `.field`/`@field` hops within the target file either way.
+
 ## Later / not scheduled
 
 - Per-target file sets (e.g. `linux.zig` vs `windows.zig` selected by

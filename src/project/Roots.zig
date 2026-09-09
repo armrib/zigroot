@@ -94,10 +94,13 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
 
                 try roots.add(gpa, .{ .file = f.id, .local = sym_id }, .@"test");
 
-                const chained = FieldChain.resolve(semantic, semantic, sym_id, ref.node);
-                if (chained.symbol != sym_id) {
-                    try roots.add(gpa, .{ .file = f.id, .local = chained.symbol }, .@"test");
+                const chain = FieldChain.resolveChain(semantic, semantic, sym_id, ref.node, .definite);
+                if (chain.result.symbol != sym_id) {
+                    try roots.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, .@"test");
                 }
+                if (chain.unknown) |unknown| for (unknown.exports) |target| {
+                    try roots.add(gpa, .{ .file = f.id, .local = target }, .@"test");
+                };
             }
         }
     }

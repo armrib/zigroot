@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-12. Implemented so far:
+Status: Phase 0-13. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -63,6 +63,11 @@ Status: Phase 0-12. Implemented so far:
   boundary (`@field(storage, "start")`), via the same target-file
   export-matching `Resolver` uses for `storage.start()`
   (`src/project/DynamicField.zig`, `src/project/Resolver.zig`).
+- `FieldChain.resolveChain` interleaves static `.field` hops and
+  `@field(...)` hops in one walk, so `@field(Foo, "Bar").baz()` and
+  `@field(Outer.Inner, "run")` both resolve as far as they can — instead of
+  `@field` being a one-hop dead end — both same-file (`SymbolGraph`) and
+  across an `@import` boundary (`Resolver`) (`src/project/FieldChain.zig`).
 
 Not yet implemented: instance-method resolution (needs real type
 inference), per-target file sets in `build.zig` (e.g. `linux.zig` vs

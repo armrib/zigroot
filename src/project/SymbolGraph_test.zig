@@ -123,6 +123,67 @@ test "Outer.Inner.run() chains through two nested containers" {
     try t.expect(found_run);
 }
 
+test "@field(Foo, \"Bar\").baz() chains from the @field hop into a further .field hop" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub const Bar = struct {
+        \\        pub fn baz() void {}
+        \\    };
+        \\};
+        \\fn a() void { @field(Foo, "Bar").baz(); }
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const baz_id = sem.symbols.getSymbolNamed("baz").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var found: ?SymbolGraph.Target = null;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = baz_id })) found = edge;
+    }
+    try t.expect(found != null);
+    try t.expectEqual(SymbolGraph.EdgeKind.possible, found.?.kind);
+}
+
+test "@field(Outer.Inner, \"run\") resolves through a FieldChain-resolved container" {
+    var sem = try build(
+        \\const Outer = struct {
+        \\    pub const Inner = struct {
+        \\        pub fn run() void {}
+        \\    };
+        \\};
+        \\fn a() void { @field(Outer.Inner, "run")(); }
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const run_id = sem.symbols.getSymbolNamed("run").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var found = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = run_id })) found = true;
+    }
+    try t.expect(found);
+}
+
 test "an unreferenced declaration has no outgoing edges" {
     var sem = try build(
         \\fn a() void {}

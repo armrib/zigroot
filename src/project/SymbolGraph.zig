@@ -20,7 +20,6 @@ const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
-const DynamicField = @import("DynamicField.zig");
 const Semantic = zlint.Semantic;
 
 const SymbolGraph = @This();
@@ -82,15 +81,16 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// reference occurs in. References with no owner (outside any declaration)
 /// are skipped.
 ///
-/// A reference used as the base of a `container.member` chain (Phase 7's
-/// `FieldChain`) also gets an edge straight to the innermost resolved
-/// export, alongside the direct edge to the container itself — so
-/// `Foo.bar()` reaches both `Foo` and `bar`.
-///
-/// A reference used as the container argument of `@field(...)` (Phase 9's
-/// `DynamicField`) similarly gets an edge to the resolved export
-/// (`.possible`, comptime-known name) or to every export (`.unknown`,
-/// runtime name).
+/// A reference used as the base of a `container.member` chain, or as the
+/// container argument of `@field(...)`, also gets an edge straight to the
+/// innermost resolved export, alongside the direct edge to the container
+/// itself — so `Foo.bar()` reaches both `Foo` and `bar`. Phase 13's
+/// `FieldChain.resolveChain` interleaves both hop kinds, so a chain can
+/// freely mix `.field` and `@field(...)` hops (`@field(Foo, "Bar").baz()`),
+/// downgrading to `.possible` for the rest of the chain once a
+/// comptime-known `@field` hop is taken. A runtime-named `@field` hop can't
+/// be chased further — every export of the container at that point becomes
+/// an `.unknown` edge instead.
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
@@ -103,16 +103,16 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             const owner_id: SymbolId = .{ .file = file, .local = owner };
             try graph.addEdge(gpa, owner_id, .{ .file = file, .local = sym_id }, ref.node, .definite);
 
-            const chained = FieldChain.resolve(semantic, semantic, sym_id, ref.node);
-            if (chained.symbol != sym_id) {
-                try graph.addEdge(gpa, owner_id, .{ .file = file, .local = chained.symbol }, chained.node, .definite);
+            const chain = FieldChain.resolveChain(semantic, semantic, sym_id, ref.node, .definite);
+            if (chain.result.symbol != sym_id) {
+                const kind: EdgeKind = switch (chain.result.kind) {
+                    .definite => .definite,
+                    .possible => .possible,
+                };
+                try graph.addEdge(gpa, owner_id, .{ .file = file, .local = chain.result.symbol }, chain.result.node, kind);
             }
-
-            if (DynamicField.resolve(semantic, semantic, sym_id, ref.node)) |resolution| switch (resolution) {
-                .possible => |target| try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .possible),
-                .unknown => |exports| for (exports) |target| {
-                    try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .unknown);
-                },
+            if (chain.unknown) |unknown| for (unknown.exports) |target| {
+                try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);
             };
         }
     }
