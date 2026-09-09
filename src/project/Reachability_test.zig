@@ -32,7 +32,7 @@ test "declarations only referenced by other dead code are reported dead" {
 
     const file_id = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     var cross_file = try Resolver.build(t.allocator, &project);
@@ -83,7 +83,7 @@ test "a call chain reachable from main is not dead, even transitively" {
 
     const file_id = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     var cross_file = try Resolver.build(t.allocator, &project);
@@ -116,7 +116,7 @@ test "export declarations are reachable even without any referencing root" {
 
     const file_id = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     var cross_file = try Resolver.build(t.allocator, &project);
@@ -131,4 +131,75 @@ test "export declarations are reachable even without any referencing root" {
 
     try t.expect(reachability.isReachable(.{ .file = file_id, .local = plugin_init }));
     try t.expect(!reachability.isReachable(.{ .file = file_id, .local = unused }));
+}
+
+test "extern declarations are never reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\extern fn c_helper() void;
+        \\pub fn main() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const c_helper = semantic.symbols.getSymbolNamed("c_helper").?;
+    for (dead.items) |id| {
+        try t.expect(!id.eql(.{ .file = file_id, .local = c_helper }));
+    }
+}
+
+test "a symbol only referenced from a test block is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn only_used_in_test() void {}
+        \\pub fn main() void {}
+        \\
+        \\test "covers only_used_in_test" {
+        \\    only_used_in_test();
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const target = semantic.symbols.getSymbolNamed("only_used_in_test").?;
+    try t.expect(reachability.isReachable(.{ .file = file_id, .local = target }));
 }

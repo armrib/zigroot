@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-7. Implemented so far:
+Status: Phase 0-8. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -27,8 +27,14 @@ Status: Phase 0-7. Implemented so far:
   `OwnerMap` (`src/project/SymbolGraph.zig`). `File` builds one alongside
   its `semantic` and `OwnerMap`.
 - `Roots`: automatic reachability roots — each `--root` file's `main`
-  (`executable_entry`) and every `export`ed symbol (`.export`)
-  (`src/project/Roots.zig`).
+  (`executable_entry`), every `export`ed symbol (`.export`), every symbol
+  referenced from a `test { ... }` block (`.test`, since ZLint gives `test`
+  blocks no symbol identity of their own to make a root out of directly),
+  and, under `PublicPolicy.root` (library mode, `--library`), every `pub`
+  symbol (`.public_api`) (`src/project/Roots.zig`).
+- `extern` declarations are excluded from `deadSymbols` — their
+  implementation lives outside the project, so local reachability can't
+  justify calling them dead (`src/project/Reachability.zig`).
 - `Reachability`: BFS over `SymbolGraph` from `Roots`, plus `Resolver`'s
   cross-file edges; `deadSymbols` lists every declared symbol the BFS never
   reaches (`src/project/Reachability.zig`). The CLI reports these after
@@ -43,9 +49,8 @@ Status: Phase 0-7. Implemented so far:
   container graph traversal (`src/project/FieldChain.zig`).
 
 Not yet implemented: instance-method resolution (needs real type
-inference), roots beyond `main`/`export` (tests, `pub` policy), confidence
-levels for unresolved edges, SCC reporting. See `docs/ROADMAP.md` for the
-full phase plan.
+inference), confidence levels for unresolved edges, SCC reporting. See
+`docs/ROADMAP.md` for the full phase plan.
 
 ## Build
 
@@ -67,6 +72,8 @@ zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
 - `--root <file.zig>`: a project entry point, followed transitively through
   `@import("*.zig")`. Repeatable.
 - `--dir <path>`: directory to scan for orphan `.zig` files (default `.`).
+- `--library`: treat every `pub` symbol as reachable library API (default:
+  executable mode, where `pub` alone doesn't make a symbol a root).
 
 Exits non-zero if any orphan files are found.
 
@@ -83,7 +90,7 @@ src/
     SymbolId.zig              project-wide symbol identity
     OwnerMap.zig              node -> containing-declaration map
     SymbolGraph.zig           same-file Symbol -> Symbol reference edges
-    Roots.zig                 automatic reachability roots (main, export)
+    Roots.zig                 automatic reachability roots (main, export, test, pub policy)
     Reachability.zig          BFS over SymbolGraph + Resolver edges from Roots
     Resolver.zig              cross-file Symbol -> Symbol edges via @import
     FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution

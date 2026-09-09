@@ -122,7 +122,7 @@ test "a symbol only reachable across an @import is not reported dead" {
 
     _ = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     var cross_file = try Resolver.build(t.allocator, &project);

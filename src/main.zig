@@ -16,6 +16,7 @@ const Project = zigroot.Project;
 const Options = struct {
     roots: std.ArrayListUnmanaged([]const u8) = .empty,
     scan_dir: []const u8 = ".",
+    public_policy: zigroot.Roots.PublicPolicy = .analyze,
 
     fn deinit(self: *Options, gpa: std.mem.Allocator) void {
         self.roots.deinit(gpa);
@@ -47,6 +48,8 @@ pub fn main() !u8 {
                 std.debug.print("error: --dir requires a path argument\n", .{});
                 return 1;
             };
+        } else if (std.mem.eql(u8, arg, "--library")) {
+            opts.public_policy = .root;
         } else {
             std.debug.print("error: unrecognized argument '{s}'\n", .{arg});
             return 1;
@@ -57,9 +60,12 @@ pub fn main() !u8 {
         std.debug.print(
             \\usage: zigroot --root <file.zig> [--root <file.zig> ...] [--dir <path>]
             \\
-            \\  --root  a project entry point; followed transitively through
-            \\          @import("*.zig")
-            \\  --dir   directory to scan for orphan .zig files (default: ".")
+            \\  --root     a project entry point; followed transitively through
+            \\             @import("*.zig")
+            \\  --dir      directory to scan for orphan .zig files (default: ".")
+            \\  --library  treat every `pub` symbol as reachable library API
+            \\             (default: executable mode, where `pub` alone
+            \\             doesn't make a symbol a root)
             \\
         , .{});
         return 1;
@@ -115,7 +121,7 @@ pub fn main() !u8 {
         std.debug.print("\nno orphan files under '{s}'\n", .{opts.scan_dir});
     }
 
-    var roots = try zigroot.Roots.build(gpa, &project);
+    var roots = try zigroot.Roots.build(gpa, &project, opts.public_policy);
     defer roots.deinit(gpa);
 
     var cross_file = try zigroot.Resolver.build(gpa, &project);

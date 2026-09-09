@@ -4,6 +4,7 @@ const std = @import("std");
 const t = std.testing;
 const Project = @import("../Project.zig");
 const Roots = @import("Roots.zig");
+const SymbolId = @import("SymbolId.zig").SymbolId;
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
@@ -28,7 +29,7 @@ test "a root file's main becomes an executable_entry root" {
 
     const file_id = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     const main_id = project.file(file_id).semantic.symbols.getSymbolNamed("main").?;
@@ -55,7 +56,7 @@ test "an export declaration is a root even with no references" {
 
     const file_id = try project.addRoot(root_path);
 
-    var roots = try Roots.build(t.allocator, &project);
+    var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
     const plugin_id = project.file(file_id).semantic.symbols.getSymbolNamed("plugin_init").?;
@@ -63,4 +64,74 @@ test "an export declaration is a root even with no references" {
     try t.expectEqual(@as(usize, 1), roots.roots.items.len);
     try t.expect(roots.roots.items[0].symbol.eql(.{ .file = file_id, .local = plugin_id }));
     try t.expectEqual(Roots.RootKind.@"export", roots.roots.items[0].kind);
+}
+
+test "a symbol referenced only from a test block is a test root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn only_used_in_test() void {}
+        \\pub fn main() void {}
+        \\
+        \\test "covers only_used_in_test" {
+        \\    only_used_in_test();
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    const target_id = project.file(file_id).semantic.symbols.getSymbolNamed("only_used_in_test").?;
+
+    var found = false;
+    for (roots.roots.items) |root| {
+        if (root.symbol.eql(.{ .file = file_id, .local = target_id })) {
+            try t.expectEqual(Roots.RootKind.@"test", root.kind);
+            found = true;
+        }
+    }
+    try t.expect(found);
+}
+
+test "pub symbols are only roots under PublicPolicy.root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "lib.zig",
+        \\pub fn api() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "lib.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+    const api_id: SymbolId = .{ .file = file_id, .local = project.file(file_id).semantic.symbols.getSymbolNamed("api").? };
+
+    var analyze_roots = try Roots.build(t.allocator, &project, .analyze);
+    defer analyze_roots.deinit(t.allocator);
+    for (analyze_roots.roots.items) |root| try t.expect(!root.symbol.eql(api_id));
+
+    var library_roots = try Roots.build(t.allocator, &project, .root);
+    defer library_roots.deinit(t.allocator);
+
+    var found = false;
+    for (library_roots.roots.items) |root| {
+        if (root.symbol.eql(api_id)) {
+            try t.expectEqual(Roots.RootKind.public_api, root.kind);
+            found = true;
+        }
+    }
+    try t.expect(found);
 }

@@ -63,6 +63,9 @@ pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots, cross
 }
 
 /// Every symbol declared in `project` that `build` did not mark reachable.
+/// Skips `extern` declarations (Phase 8): their implementation lives
+/// outside the project, so local reachability alone can never justify
+/// calling them dead.
 /// Caller owns the returned list.
 pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Project) Allocator.Error!std.ArrayListUnmanaged(SymbolId) {
     var dead: std.ArrayListUnmanaged(SymbolId) = .empty;
@@ -71,6 +74,7 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
     for (project.files.items) |f| {
         var it = f.semantic.symbols.iter();
         while (it.next()) |local| {
+            if (f.semantic.symbols.get(local).flags.s_extern) continue;
             const id: SymbolId = .{ .file = f.id, .local = local };
             if (!self.isReachable(id)) try dead.append(gpa, id);
         }
