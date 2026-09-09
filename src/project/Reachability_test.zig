@@ -5,6 +5,7 @@ const t = std.testing;
 const Project = @import("../Project.zig");
 const Roots = @import("Roots.zig");
 const Reachability = @import("Reachability.zig");
+const Resolver = @import("Resolver.zig");
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
@@ -34,7 +35,10 @@ test "declarations only referenced by other dead code are reported dead" {
     var roots = try Roots.build(t.allocator, &project);
     defer roots.deinit(t.allocator);
 
-    var reachability = try Reachability.build(t.allocator, &project, &roots);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
     defer reachability.deinit(t.allocator);
 
     const semantic = &project.file(file_id).semantic;
@@ -82,7 +86,10 @@ test "a call chain reachable from main is not dead, even transitively" {
     var roots = try Roots.build(t.allocator, &project);
     defer roots.deinit(t.allocator);
 
-    var reachability = try Reachability.build(t.allocator, &project, &roots);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
     defer reachability.deinit(t.allocator);
 
     const semantic = &project.file(file_id).semantic;
@@ -112,7 +119,10 @@ test "export declarations are reachable even without any referencing root" {
     var roots = try Roots.build(t.allocator, &project);
     defer roots.deinit(t.allocator);
 
-    var reachability = try Reachability.build(t.allocator, &project, &roots);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
     defer reachability.deinit(t.allocator);
 
     const semantic = &project.file(file_id).semantic;

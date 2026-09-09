@@ -3,10 +3,11 @@
 //! Loads one or more project roots, follows their `@import("*.zig")`
 //! chains, scans a directory for `.zig` files that no root ever reaches
 //! ("orphan files"), then reports declarations unreachable from any root
-//! (`executable_entry`'s `main`, or `export`ed symbols) via same-file
-//! `SymbolGraph` reachability (Phase 5). Cross-file reachability
-//! (`storage.start()`) is Phase 6+, so a symbol only reached from another
-//! file is still reported dead here.
+//! (`executable_entry`'s `main`, or `export`ed symbols) via `SymbolGraph`
+//! reachability (Phase 5) plus cross-file `@import` edges (Phase 6). Only
+//! the `binding.member` shape resolves across files so far; `Foo.bar()`
+//! and instance-method calls are Phase 7+, so a symbol only reached that
+//! way is still reported dead here.
 
 const std = @import("std");
 const zigroot = @import("zigroot");
@@ -117,7 +118,10 @@ pub fn main() !u8 {
     var roots = try zigroot.Roots.build(gpa, &project);
     defer roots.deinit(gpa);
 
-    var reachability = try zigroot.Reachability.build(gpa, &project, &roots);
+    var cross_file = try zigroot.Resolver.build(gpa, &project);
+    defer cross_file.deinit(gpa);
+
+    var reachability = try zigroot.Reachability.build(gpa, &project, &roots, &cross_file);
     defer reachability.deinit(gpa);
 
     var dead = try reachability.deadSymbols(gpa, &project);

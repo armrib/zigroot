@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-5. Implemented so far:
+Status: Phase 0-6. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -29,14 +29,19 @@ Status: Phase 0-5. Implemented so far:
 - `Roots`: automatic reachability roots — each `--root` file's `main`
   (`executable_entry`) and every `export`ed symbol (`.export`)
   (`src/project/Roots.zig`).
-- `Reachability`: BFS over `SymbolGraph` from `Roots`; `deadSymbols` lists
-  every declared symbol the BFS never reaches (`src/project/Reachability.zig`).
-  The CLI reports these after orphan-file detection.
+- `Reachability`: BFS over `SymbolGraph` from `Roots`, plus `Resolver`'s
+  cross-file edges; `deadSymbols` lists every declared symbol the BFS never
+  reaches (`src/project/Reachability.zig`). The CLI reports these after
+  orphan-file detection.
+- `Resolver`: resolves `const storage = @import("storage.zig");
+  storage.start();` into a cross-file `SymbolGraph` edge, by matching a
+  member-access reference on an import binding against the target file's
+  exported symbols (`src/project/Resolver.zig`).
 
-Not yet implemented: cross-file member resolution (`storage.start()`),
-roots beyond `main`/`export` (tests, `pub` policy), confidence levels for
-unresolved edges, SCC reporting. See `docs/ROADMAP.md` for the full phase
-plan.
+Not yet implemented: `Foo.bar()` static-member and instance-method
+resolution, roots beyond `main`/`export` (tests, `pub` policy), confidence
+levels for unresolved edges, SCC reporting. See `docs/ROADMAP.md` for the
+full phase plan.
 
 ## Build
 
@@ -75,7 +80,8 @@ src/
     OwnerMap.zig              node -> containing-declaration map
     SymbolGraph.zig           same-file Symbol -> Symbol reference edges
     Roots.zig                 automatic reachability roots (main, export)
-    Reachability.zig          BFS over SymbolGraph from Roots
+    Reachability.zig          BFS over SymbolGraph + Resolver edges from Roots
+    Resolver.zig              cross-file Symbol -> Symbol edges via @import
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```

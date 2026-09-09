@@ -1,16 +1,17 @@
 //! Phase 5: BFS reachability over `SymbolGraph` starting from `Roots`,
 //! `O(V+E)` in the number of symbols and edges visited.
 //!
-//! Scoped to same-file edges only, since Phase 4's `SymbolGraph` doesn't
-//! cross files yet (that's Phase 6's `Resolver`). A symbol this analysis
-//! calls dead might only be reached from another file — that's a known
-//! false positive until cross-file resolution lands, not a bug here.
+//! Also follows Phase 6's cross-file `Resolver` edges, so a symbol only
+//! referenced through `@import` (`storage.start()`) counts as reached.
+//! Anything `Resolver` couldn't statically resolve is still invisible here —
+//! that's Phase 9's confidence levels.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Project = @import("../Project.zig");
 const Roots = @import("Roots.zig");
+const SymbolGraph = @import("SymbolGraph.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 
 const Reachability = @This();
@@ -29,8 +30,9 @@ pub fn isReachable(self: *const Reachability, id: SymbolId) bool {
 }
 
 /// BFS from every root in `roots`, following `project`'s per-file
-/// `SymbolGraph.outgoing` edges.
-pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots) Allocator.Error!Reachability {
+/// `SymbolGraph.outgoing` edges plus `cross_file`'s (Phase 6's `Resolver`
+/// output) `@import`-resolved edges.
+pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots, cross_file: *const SymbolGraph) Allocator.Error!Reachability {
     var reachability: Reachability = .empty;
     errdefer reachability.deinit(gpa);
 
@@ -46,6 +48,11 @@ pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots) Alloc
     while (queue.pop()) |current| {
         const graph = &project.file(current.file).symbol_graph;
         for (graph.outgoing(current)) |next| {
+            if (reachability.reached.contains(next)) continue;
+            try reachability.reached.put(gpa, next, {});
+            try queue.append(gpa, next);
+        }
+        for (cross_file.outgoing(current)) |next| {
             if (reachability.reached.contains(next)) continue;
             try reachability.reached.put(gpa, next, {});
             try queue.append(gpa, next);

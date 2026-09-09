@@ -11,6 +11,7 @@ pub const SymbolGraph = @import("project/SymbolGraph.zig");
 pub const SymbolId = @import("project/SymbolId.zig").SymbolId;
 pub const Roots = @import("project/Roots.zig");
 pub const Reachability = @import("project/Reachability.zig");
+pub const Resolver = @import("project/Resolver.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -22,4 +23,5 @@ test {
     _ = @import("project/SymbolGraph_test.zig");
     _ = @import("project/Roots_test.zig");
     _ = @import("project/Reachability_test.zig");
+    _ = @import("project/Resolver_test.zig");
 }

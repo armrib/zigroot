@@ -71,15 +71,24 @@ build `SymbolId -> SymbolId` edges for references within one file.
   around). Same-file scoped, like `SymbolGraph`: a symbol only used across
   a `@import` boundary is still reported dead until Phase 6.
 
-## Phase 6 — Cross-file imports
+## Phase 6 — Cross-file imports (done)
 
-Resolve `const storage = @import("storage.zig"); storage.start();` into a
-`SymbolGraph` edge `main.main -> storage.start`, using the file-level edges
-`ImportGraph` (Phase 1) already has plus the import symbol's usages.
+Resolves `const storage = @import("storage.zig"); storage.start();` into a
+`SymbolGraph` edge `main.main -> storage.start`.
 
-- `src/project/Resolver.zig`: given an import binding
-  (local symbol -> target `FileId`) and a member-access reference on that
-  symbol, resolve to the target file's exported symbol of the same name.
+- `src/project/Resolver.zig`: for every `ImportGraph` edge (Phase 1), finds
+  the import binding's symbol via `OwnerMap.get(import_node)` (the same
+  "nearest enclosing declaration" trick `OwnerMap` itself uses — the
+  `@import(...)` call is a node inside the binding's own decl). For every
+  reference to that binding used as a field-access base (`storage.start`,
+  found by checking the reference node's parent via `node_links`), matches
+  the field name against the target file's exports (`Symbol.exports` on the
+  implicit file-root symbol, id `0`) and emits a `SymbolGraph` edge from the
+  *referencing* declaration (via `OwnerMap` again) to the target export.
+- `Reachability.build` now takes this cross-file graph alongside `Roots`
+  and follows both when doing its BFS.
+- Only resolves the `binding.member` shape. `Foo.bar()` static-member
+  access and instance-method calls are still unresolved (Phase 7).
 
 ## Phase 7 — Container and static member resolution
 
