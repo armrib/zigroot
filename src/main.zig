@@ -17,6 +17,7 @@ const Options = struct {
     roots: std.ArrayListUnmanaged([]const u8) = .empty,
     scan_dir: []const u8 = ".",
     public_policy: zigroot.Roots.PublicPolicy = .analyze,
+    include_possible: bool = false,
 
     fn deinit(self: *Options, gpa: std.mem.Allocator) void {
         self.roots.deinit(gpa);
@@ -50,6 +51,8 @@ pub fn main() !u8 {
             };
         } else if (std.mem.eql(u8, arg, "--library")) {
             opts.public_policy = .root;
+        } else if (std.mem.eql(u8, arg, "--include-possible")) {
+            opts.include_possible = true;
         } else {
             std.debug.print("error: unrecognized argument '{s}'\n", .{arg});
             return 1;
@@ -66,6 +69,11 @@ pub fn main() !u8 {
             \\  --library  treat every `pub` symbol as reachable library API
             \\             (default: executable mode, where `pub` alone
             \\             doesn't make a symbol a root)
+            \\  --include-possible
+            \\             also report declarations only reachable through
+            \\             an unresolved dynamic access (e.g. `@field(Foo,
+            \\             name)` with a runtime name) as dead, instead of
+            \\             giving them the benefit of the doubt
             \\
         , .{});
         return 1;
@@ -133,13 +141,21 @@ pub fn main() !u8 {
     var dead = try reachability.deadSymbols(gpa, &project);
     defer dead.deinit(gpa);
 
-    if (dead.items.len > 0) {
-        std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead.items.len});
-        for (dead.items) |id| {
-            const sym = project.symbol(id);
-            if (sym.name.len == 0) continue;
-            std.debug.print("  {s}: {s}\n", .{ project.file(id.file).path, sym.name });
-        }
+    var reported: usize = 0;
+    for (dead.items) |d| {
+        if (d.possible and !opts.include_possible) continue;
+        const name = project.symbol(d.id).name;
+        if (name.len == 0) continue;
+        if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
+        reported += 1;
+        std.debug.print("  {s}: {s}{s}\n", .{
+            project.file(d.id.file).path,
+            name,
+            if (d.possible) " (possible: only reached via an unresolved dynamic access)" else "",
+        });
+    }
+
+    if (reported > 0) {
         had_errors = true;
     } else {
         std.debug.print("\nno dead declarations found\n", .{});

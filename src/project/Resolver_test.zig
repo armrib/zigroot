@@ -52,7 +52,7 @@ test "storage.start() produces a cross-file edge to storage.zig's start" {
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
     try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].eql(.{ .file = storage_id, .local = start_sym }));
+    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = start_sym }));
 }
 
 test "storage.Inner.run() chains a cross-file edge through a nested container" {
@@ -94,7 +94,7 @@ test "storage.Inner.run() chains a cross-file edge through a nested container" {
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
     try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].eql(.{ .file = storage_id, .local = run_sym }));
+    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = run_sym }));
 }
 
 test "a symbol only reachable across an @import is not reported dead" {

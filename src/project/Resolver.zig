@@ -57,6 +57,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
                 .{ .file = import_edge.from, .local = owner },
                 .{ .file = import_edge.to, .local = chained.symbol },
                 chained.node,
+                .definite,
             );
         }
     }

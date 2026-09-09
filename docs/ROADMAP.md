@@ -128,13 +128,30 @@ Added `src/project/FieldChain.zig`, shared by `SymbolGraph` (same-file) and
   `analyze` (executable mode) since `--root` already implies an entry
   point.
 
-## Phase 9 — Confidence levels for unresolved edges
+## Phase 9 — Confidence levels for unresolved edges (done)
 
-`EdgeKind = enum { definite, possible, unknown }`. Anything that can't be
-statically resolved (`@field(Foo, name)`, function pointers, dynamic
-dispatch) produces an `unknown` edge rather than being silently dropped or
-treated as reachable/dead. Default CLI report only lists `definite` dead
-declarations; `--include-possible` widens it.
+- `SymbolGraph.EdgeKind = enum { definite, possible, unknown }`, added to
+  `Edge` and to `outgoing`'s return type (`Target { to, kind }`). Existing
+  direct-reference and `FieldChain`-resolved edges are `.definite`.
+- `src/project/DynamicField.zig`: resolves `@field(Foo, name)`, the
+  flagship unresolved-access case `FieldChain` (a `.field_access` AST node)
+  never sees since it's a builtin call instead. A comptime string-literal
+  name resolves to one export at `.possible` confidence (a less-exercised
+  code path than plain `Foo.bar`, so a notch less trusted). A runtime name
+  can't name one target, so every export of the container becomes an
+  `.unknown` edge — recorded rather than silently dropped. `SymbolGraph`
+  wires this in the same reference-iteration loop that already drives
+  `FieldChain`; cross-file `@field` (through `Resolver`'s `@import` hop),
+  function pointers, and instance-method dynamic dispatch are still
+  unresolved.
+- `Reachability.build` only follows `.definite`/`.possible` edges in its
+  BFS. Once that settles, a second pass over every `.unknown` edge whose
+  source *is* reached marks its target `possiblyReachable` — not proven
+  live, not silently called dead either. `deadSymbols` tags each result
+  `{ id, possible }` instead of returning bare `SymbolId`s.
+- CLI: default report only lists non-`possible` dead declarations;
+  `--include-possible` widens it to include the uncertain ones too,
+  annotated in the output.
 
 ## Later / not scheduled
 

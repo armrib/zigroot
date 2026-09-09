@@ -55,10 +55,10 @@ test "declarations only referenced by other dead code are reported dead" {
 
     var found_a = false;
     var found_b = false;
-    for (dead.items) |id| {
-        if (id.eql(.{ .file = file_id, .local = dead_a })) found_a = true;
-        if (id.eql(.{ .file = file_id, .local = dead_b })) found_b = true;
-        try t.expect(!id.eql(.{ .file = file_id, .local = main }));
+    for (dead.items) |d| {
+        if (d.id.eql(.{ .file = file_id, .local = dead_a })) found_a = true;
+        if (d.id.eql(.{ .file = file_id, .local = dead_b })) found_b = true;
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = main }));
     }
     try t.expect(found_a);
     try t.expect(found_b);
@@ -164,8 +164,8 @@ test "extern declarations are never reported dead" {
 
     const semantic = &project.file(file_id).semantic;
     const c_helper = semantic.symbols.getSymbolNamed("c_helper").?;
-    for (dead.items) |id| {
-        try t.expect(!id.eql(.{ .file = file_id, .local = c_helper }));
+    for (dead.items) |d| {
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = c_helper }));
     }
 }
 
@@ -202,4 +202,90 @@ test "a symbol only referenced from a test block is not reported dead" {
     const semantic = &project.file(file_id).semantic;
     const target = semantic.symbols.getSymbolNamed("only_used_in_test").?;
     try t.expect(reachability.isReachable(.{ .file = file_id, .local = target }));
+}
+
+test "a symbol only reached via @field(Foo, name) is possibly, not definitely, reachable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Foo = struct {
+        \\    pub fn bar() void {}
+        \\};
+        \\pub fn main() void {
+        \\    const name = getName();
+        \\    @field(Foo, name)();
+        \\}
+        \\fn getName() []const u8 { return "bar"; }
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const bar = semantic.symbols.getSymbolNamed("bar").?;
+
+    try t.expect(!reachability.isReachable(.{ .file = file_id, .local = bar }));
+    try t.expect(reachability.isPossiblyReachable(.{ .file = file_id, .local = bar }));
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    var found_possible_bar = false;
+    for (dead.items) |d| {
+        if (d.id.eql(.{ .file = file_id, .local = bar })) {
+            try t.expect(d.possible);
+            found_possible_bar = true;
+        }
+    }
+    try t.expect(found_possible_bar);
+}
+
+test "@field(Foo, \"bar\") with a comptime-known name is definitely reachable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Foo = struct {
+        \\    pub fn bar() void {}
+        \\};
+        \\pub fn main() void {
+        \\    @field(Foo, "bar")();
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const bar = semantic.symbols.getSymbolNamed("bar").?;
+    try t.expect(reachability.isReachable(.{ .file = file_id, .local = bar }));
 }

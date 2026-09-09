@@ -20,19 +20,37 @@ const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
+const DynamicField = @import("DynamicField.zig");
 const Semantic = zlint.Semantic;
 
 const SymbolGraph = @This();
+
+/// Phase 9: how confidently an edge's target was resolved.
+///
+/// - `definite`: a direct reference, or a `FieldChain`-resolved
+///   `container.member` access — the compiler-guaranteed static shape.
+/// - `possible`: resolved, but via a less-exercised path (e.g.
+///   `@field(Foo, "bar")` with a comptime-known name).
+/// - `unknown`: no single target could be determined statically (e.g.
+///   `@field(Foo, name)` with a runtime name) — the edge names every
+///   plausible target rather than being dropped.
+pub const EdgeKind = enum { definite, possible, unknown };
 
 pub const Edge = struct {
     from: SymbolId,
     to: SymbolId,
     node: Semantic.Ast.Node.Index,
+    kind: EdgeKind,
+};
+
+pub const Target = struct {
+    to: SymbolId,
+    kind: EdgeKind,
 };
 
 edges: std.ArrayListUnmanaged(Edge) = .empty,
-/// from -> [to, to, ...]
-adjacency: std.AutoHashMapUnmanaged(SymbolId, std.ArrayListUnmanaged(SymbolId)) = .empty,
+/// from -> [(to, kind), ...]
+adjacency: std.AutoHashMapUnmanaged(SymbolId, std.ArrayListUnmanaged(Target)) = .empty,
 
 pub const empty: SymbolGraph = .{};
 
@@ -44,16 +62,17 @@ pub fn deinit(self: *SymbolGraph, gpa: Allocator) void {
     self.* = undefined;
 }
 
-pub fn addEdge(self: *SymbolGraph, gpa: Allocator, from: SymbolId, to: SymbolId, node: Semantic.Ast.Node.Index) !void {
-    try self.edges.append(gpa, .{ .from = from, .to = to, .node = node });
+pub fn addEdge(self: *SymbolGraph, gpa: Allocator, from: SymbolId, to: SymbolId, node: Semantic.Ast.Node.Index, kind: EdgeKind) !void {
+    try self.edges.append(gpa, .{ .from = from, .to = to, .node = node, .kind = kind });
     const gop = try self.adjacency.getOrPut(gpa, from);
     if (!gop.found_existing) gop.value_ptr.* = .empty;
-    try gop.value_ptr.append(gpa, to);
+    try gop.value_ptr.append(gpa, .{ .to = to, .kind = kind });
 }
 
-/// Symbols directly referenced from `from`'s declaration body. Empty slice
-/// if `from` isn't known to reference anything.
-pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const SymbolId {
+/// Symbols directly referenced from `from`'s declaration body, with the
+/// confidence each was resolved at. Empty slice if `from` isn't known to
+/// reference anything.
+pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
     if (self.adjacency.get(from)) |list| return list.items;
     return &.{};
 }
@@ -67,6 +86,11 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const SymbolId {
 /// `FieldChain`) also gets an edge straight to the innermost resolved
 /// export, alongside the direct edge to the container itself — so
 /// `Foo.bar()` reaches both `Foo` and `bar`.
+///
+/// A reference used as the container argument of `@field(...)` (Phase 9's
+/// `DynamicField`) similarly gets an edge to the resolved export
+/// (`.possible`, comptime-known name) or to every export (`.unknown`,
+/// runtime name).
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
@@ -76,12 +100,20 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
         var ref_it = semantic.symbols.iterReferences(sym_id);
         while (ref_it.next()) |ref| {
             const owner = owner_map.get(ref.node) orelse continue;
-            try graph.addEdge(gpa, .{ .file = file, .local = owner }, .{ .file = file, .local = sym_id }, ref.node);
+            const owner_id: SymbolId = .{ .file = file, .local = owner };
+            try graph.addEdge(gpa, owner_id, .{ .file = file, .local = sym_id }, ref.node, .definite);
 
             const chained = FieldChain.resolve(semantic, semantic, sym_id, ref.node);
             if (chained.symbol != sym_id) {
-                try graph.addEdge(gpa, .{ .file = file, .local = owner }, .{ .file = file, .local = chained.symbol }, chained.node);
+                try graph.addEdge(gpa, owner_id, .{ .file = file, .local = chained.symbol }, chained.node, .definite);
             }
+
+            if (DynamicField.resolve(semantic, sym_id, ref.node)) |resolution| switch (resolution) {
+                .possible => |target| try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .possible),
+                .unknown => |exports| for (exports) |target| {
+                    try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, ref.node, .unknown);
+                },
+            };
         }
     }
 

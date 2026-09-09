@@ -36,7 +36,7 @@ test "a call within one function's body produces an edge to the called function"
 
     const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
     try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].eql(.{ .file = file, .local = b_id }));
+    try t.expect(outgoing[0].to.eql(.{ .file = file, .local = b_id }));
 }
 
 test "a reference nested inside a block still edges from the enclosing function" {
@@ -63,7 +63,7 @@ test "a reference nested inside a block still edges from the enclosing function"
 
     const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
     try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].eql(.{ .file = file, .local = b_id }));
+    try t.expect(outgoing[0].to.eql(.{ .file = file, .local = b_id }));
 }
 
 test "Foo.bar() edges to both Foo and Foo's exported bar" {
@@ -89,8 +89,8 @@ test "Foo.bar() edges to both Foo and Foo's exported bar" {
 
     const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
     try t.expectEqual(@as(usize, 2), outgoing.len);
-    try t.expect(outgoing[0].eql(.{ .file = file, .local = foo_id }));
-    try t.expect(outgoing[1].eql(.{ .file = file, .local = bar_id }));
+    try t.expect(outgoing[0].to.eql(.{ .file = file, .local = foo_id }));
+    try t.expect(outgoing[1].to.eql(.{ .file = file, .local = bar_id }));
 }
 
 test "Outer.Inner.run() chains through two nested containers" {
@@ -118,7 +118,7 @@ test "Outer.Inner.run() chains through two nested containers" {
     const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
     var found_run = false;
     for (outgoing) |edge| {
-        if (edge.eql(.{ .file = file, .local = run_id })) found_run = true;
+        if (edge.to.eql(.{ .file = file, .local = run_id })) found_run = true;
     }
     try t.expect(found_run);
 }
