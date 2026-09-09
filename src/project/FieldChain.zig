@@ -95,11 +95,48 @@ pub fn fieldAccessName(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?[]c
     return ast.tokenSlice(data[1]);
 }
 
+/// Every file's top-level declarations are exported from this symbol.
+/// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
+/// always 0. Mirrors `Resolver`'s and `Roots`' constant of the same name.
+const FILE_ROOT_SYMBOL: Semantic.Symbol.Id = @enumFromInt(0);
+
 /// A symbol directly exported by `container` (ZLint's `Symbol.exports`)
-/// named `name`, if any.
+/// named `name`, if any. `container` is resolved through a top-level `const
+/// X = @This();` alias first (see `thisAliasRoot`) — the common
+/// `Self`/`<TypeName>` idiom for a file's own type naming itself, which
+/// otherwise dead-ends every container lookup that lands on it, since the
+/// alias is a plain `const`, not a container, and so has no exports of its
+/// own.
 pub fn findExport(symbols: *const Semantic, container: Semantic.Symbol.Id, name: []const u8) ?Semantic.Symbol.Id {
-    for (symbols.symbols.getExports(container).items) |id| {
+    const resolved = thisAliasRoot(symbols, container) orelse container;
+    for (symbols.symbols.getExports(resolved).items) |id| {
         if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
+    }
+    return null;
+}
+
+/// If `container` is a top-level `const X = @This();` alias, the file's own
+/// root symbol (`@This()` at file scope names the file's container itself).
+/// Checked by asking whether `container` is itself one of `FILE_ROOT_SYMBOL`'s
+/// own exports, rather than walking up parents (this module has no
+/// `OwnerMap`) — which also means a *nested* `const Self = @This();` inside
+/// an inner struct isn't resolved here; only the file-top-level case is.
+/// `null` if `container` isn't such an alias.
+fn thisAliasRoot(symbols: *const Semantic, container: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const symbol = symbols.symbols.get(container);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &symbols.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    switch (ast.nodeTag(init_node)) {
+        .builtin_call_two, .builtin_call_two_comma => {},
+        else => return null,
+    }
+    if (!std.mem.eql(u8, symbols.tokenSlice(ast.nodeMainToken(init_node)), "@This")) return null;
+
+    for (symbols.symbols.getExports(FILE_ROOT_SYMBOL).items) |id| {
+        if (id == container) return FILE_ROOT_SYMBOL;
     }
     return null;
 }

@@ -118,11 +118,39 @@ fn fieldAccessRoot(semantic: *const Semantic, node: Ast.Node.Index) ?CrossFileRo
     return .{ .base = base, .field = semantic.tokenSlice(data[1]) };
 }
 
+/// If `sym_id` is a variable with no explicit type annotation, declared
+/// with a call expression as its initializer (`var s = Foo.init(...)`),
+/// the callee node (`Foo.init`) — a syntax-only extraction, no resolution.
+/// Resolving what the callee names, and what its declared return type in
+/// turn names, can cross `@import` boundaries more than once (`Semantic
+/// .Builder.init(...)`, where `Semantic.Builder` itself re-exports another
+/// file's `@import`), which needs a `Project` this module doesn't have —
+/// see `Resolver.resolveValueChain`. `null` if `sym_id` isn't a variable,
+/// already has an explicit type annotation (`resolve` covers that), or its
+/// initializer isn't a call. A leading `try` (`var s = try Foo.init(...)`,
+/// the common shape for a fallible `init`) is unwrapped first — it's not
+/// part of the call expression itself.
+pub fn callInit(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node.Index {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+
+    var init_node = decl.ast.init_node.unwrap() orelse return null;
+    if (ast.nodeTag(init_node) == .@"try") init_node = ast.nodeData(init_node).node;
+
+    var buf: [1]Ast.Node.Index = undefined;
+    const call = ast.fullCall(&buf, init_node) orelse return null;
+    return call.ast.fn_expr;
+}
+
 /// The symbol the `Reference` recorded at exactly `node` resolves to, if
 /// any. ZLint records one `Reference` per identifier use, keyed by that
 /// identifier's own node, but doesn't index them by node for lookup — this
 /// scans for it directly.
-fn referenceAt(semantic: *const Semantic, node: Ast.Node.Index) ?Semantic.Symbol.Id {
+pub fn referenceAt(semantic: *const Semantic, node: Ast.Node.Index) ?Semantic.Symbol.Id {
     const nodes = semantic.symbols.references.items(.node);
     const symbols = semantic.symbols.references.items(.symbol);
     for (nodes, 0..) |ref_node, i| {
