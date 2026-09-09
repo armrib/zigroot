@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const zlint = @import("zlint");
 
 const FileId = @import("FileId.zig").FileId;
+const OwnerMap = @import("OwnerMap.zig");
 
 const File = @This();
 
@@ -18,6 +19,9 @@ path: []const u8,
 /// Must outlive `semantic`.
 source: [:0]u8,
 semantic: zlint.Semantic,
+/// Node -> containing-declaration map, built from `semantic`. See
+/// `OwnerMap`.
+owner_map: OwnerMap,
 
 /// Reads `path` from disk, parses it, and runs ZLint's semantic builder
 /// over it. `path` must already be resolved (see `Project.resolvePath`);
@@ -33,15 +37,20 @@ pub fn load(gpa: Allocator, id: FileId, path: []const u8) !File {
     errdefer result.value.deinit();
     result.errors.deinit(gpa);
 
+    var owner_map = try OwnerMap.build(gpa, &result.value);
+    errdefer owner_map.deinit(gpa);
+
     return .{
         .id = id,
         .path = try gpa.dupe(u8, path),
         .source = source,
         .semantic = result.value,
+        .owner_map = owner_map,
     };
 }
 
 pub fn deinit(self: *File, gpa: Allocator) void {
+    self.owner_map.deinit(gpa);
     self.semantic.deinit();
     gpa.free(self.source);
     gpa.free(self.path);

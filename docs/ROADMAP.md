@@ -1,12 +1,12 @@
 # Roadmap
 
-Phase 0-1 are done (see README.md). This tracks what's left to get from
+Phase 0-3 are done (see README.md). This tracks what's left to get from
 "file-level orphan detection" to "declaration-level dead-code analysis
 across a whole project".
 
-## Phase 2 — Global symbol identity
+## Phase 2 — Global symbol identity (done)
 
-Add `src/project/SymbolId.zig`:
+Added `src/project/SymbolId.zig`:
 
 ```zig
 pub const SymbolId = struct {
@@ -16,18 +16,20 @@ pub const SymbolId = struct {
 ```
 
 No remapping of ZLint's per-file symbol IDs — just pair them with the
-owning `FileId`. Add `Project.symbol(id: SymbolId) *const zlint.Semantic.Symbol`.
+owning `FileId`. Added `Project.symbol(id: SymbolId) *const zlint.Semantic.Symbol`.
 
-## Phase 3 — Owner map
+## Phase 3 — Owner map (done)
 
-For every AST node in a file, record which declaration (symbol) contains
+For every AST node in a file, records which declaration (symbol) contains
 it. Needed to invert ZLint's `Reference -> Symbol` links into
-`Symbol -> Symbol` edges.
+`Symbol -> Symbol` edges (Phase 4).
 
 - `src/project/OwnerMap.zig`: `owner: []Symbol.Id.Optional` indexed by
-  `Ast.Node.Index`, built once per file by walking declarations and
-  tagging their descendant nodes.
-- Extend `File` to hold its `OwnerMap` alongside `semantic`.
+  `Ast.Node.Index`. Built once per file, in `OwnerMap.build`, by indexing
+  each symbol's `Symbol.decl` node and then, for every node, walking
+  ZLint's already-computed `NodeLinks.parents` chain upward until it hits
+  a node that's some symbol's `decl` — the nearest enclosing declaration.
+- `File` holds its `OwnerMap` alongside `semantic`, built in `File.load`.
 
 ## Phase 4 — Same-file declaration graph
 
