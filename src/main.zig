@@ -1,10 +1,12 @@
-//! zigroot CLI: Phase 0-1 MVP.
+//! zigroot CLI.
 //!
 //! Loads one or more project roots, follows their `@import("*.zig")`
-//! chains, then scans a directory for `.zig` files that no root ever
-//! reaches ("orphan files"). This does not yet do declaration-level dead
-//! code analysis (that's Phase 5+); it only proves out the file-level
-//! project graph on top of ZLint's per-file `Semantic`.
+//! chains, scans a directory for `.zig` files that no root ever reaches
+//! ("orphan files"), then reports declarations unreachable from any root
+//! (`executable_entry`'s `main`, or `export`ed symbols) via same-file
+//! `SymbolGraph` reachability (Phase 5). Cross-file reachability
+//! (`storage.start()`) is Phase 6+, so a symbol only reached from another
+//! file is still reported dead here.
 
 const std = @import("std");
 const zigroot = @import("zigroot");
@@ -110,6 +112,27 @@ pub fn main() !u8 {
         had_errors = true;
     } else {
         std.debug.print("\nno orphan files under '{s}'\n", .{opts.scan_dir});
+    }
+
+    var roots = try zigroot.Roots.build(gpa, &project);
+    defer roots.deinit(gpa);
+
+    var reachability = try zigroot.Reachability.build(gpa, &project, &roots);
+    defer reachability.deinit(gpa);
+
+    var dead = try reachability.deadSymbols(gpa, &project);
+    defer dead.deinit(gpa);
+
+    if (dead.items.len > 0) {
+        std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead.items.len});
+        for (dead.items) |id| {
+            const sym = project.symbol(id);
+            if (sym.name.len == 0) continue;
+            std.debug.print("  {s}: {s}\n", .{ project.file(id.file).path, sym.name });
+        }
+        had_errors = true;
+    } else {
+        std.debug.print("\nno dead declarations found\n", .{});
     }
 
     return if (had_errors) 1 else 0;
