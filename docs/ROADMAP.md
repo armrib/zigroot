@@ -90,15 +90,33 @@ Resolves `const storage = @import("storage.zig"); storage.start();` into a
 - Only resolves the `binding.member` shape. `Foo.bar()` static-member
   access and instance-method calls are still unresolved (Phase 7).
 
-## Phase 7 — Container and static member resolution
+## Phase 7 — Container and static member resolution (done)
 
-Extend the resolver to `Foo.bar()` and `Outer.Inner.run()` using ZLint's
-existing `Symbol.exports` / `Symbol.members` — no type inference needed,
-just graph traversal over container relationships ZLint already computed.
+Added `src/project/FieldChain.zig`, shared by `SymbolGraph` (same-file) and
+`Resolver` (cross-file):
 
-Do not attempt instance-method resolution (`server.run()` where `server`
-is a value of some type) — that needs real type inference. Conservatively
-mark such call sites `.dynamic_member_call` (Phase 9) instead of guessing.
+- `fieldAccessName`: moved from `Resolver` — whether a node is the base of
+  a `.field` access, and the field name if so.
+- `findExport`: name lookup in a container's `Symbol.exports`.
+- `resolve(ast, symbols, start, start_node)`: walks as many `.field` hops
+  as resolve to an export, starting from `start` (declared in `symbols`,
+  first referenced at `start_node` in `ast`). Stops at the first
+  unresolvable hop — an instance value, an unmatched name, or a non-field
+  use — returning however far it got.
+- `SymbolGraph.build` now also calls `FieldChain.resolve` for every
+  reference, adding an edge straight to the innermost resolved export
+  alongside the existing direct edge to the referenced symbol, so
+  `Foo.bar()` reaches both `Foo` and `bar`. Chains through arbitrarily many
+  containers (`Outer.Inner.run()`).
+- `Resolver.build` continues the chain after the `@import` hop: the first
+  hop still matches the field name against the target file's exports (as
+  in Phase 6), then `FieldChain.resolve` continues within the target
+  file's `Semantic` for any further hops — so `storage.Inner.run()`
+  resolves across the file boundary too.
+- Only exports (static/container-level access) are walked. Instance-method
+  calls (`server.run()` where `server` is a value of some type) still need
+  real type inference and are left unresolved — Phase 9's
+  `.dynamic_member_call`.
 
 ## Phase 8 — Tests, exports, library vs executable mode
 

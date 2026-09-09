@@ -9,9 +9,11 @@
 //! the target file's exported symbols (ZLint's `Symbol.exports`, on the
 //! implicit file-root symbol every top-level declaration is exported from).
 //!
-//! Only resolves that one shape. `Foo.bar()` static-member access and
-//! instance-method calls are Phase 7+; anything else is silently left
-//! unresolved rather than guessed.
+//! After that first hop, Phase 7's `FieldChain` continues resolving further
+//! `container.member` hops entirely within the target file (e.g.
+//! `storage.Inner.run()`), so static-member access chains through an
+//! `@import` boundary too. Instance-method calls still aren't attempted —
+//! that needs real type inference.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,6 +23,7 @@ const Semantic = zlint.Semantic;
 const Project = @import("../Project.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const SymbolGraph = @import("SymbolGraph.zig");
+const FieldChain = @import("FieldChain.zig");
 
 /// Every file's top-level declarations are exported from this symbol.
 /// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
@@ -42,35 +45,21 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
-            const field_name = fieldAccessName(&from_file.semantic, ref.node) orelse continue;
-            const target_local = findExport(target_semantic, field_name) orelse continue;
+            const field_name = FieldChain.fieldAccessName(&from_file.semantic, ref.node) orelse continue;
+            const target_local = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, field_name) orelse continue;
             const owner = from_file.owner_map.get(ref.node) orelse continue;
+
+            const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+            const chained = FieldChain.resolve(&from_file.semantic, target_semantic, target_local, field_node);
 
             try graph.addEdge(
                 gpa,
                 .{ .file = import_edge.from, .local = owner },
-                .{ .file = import_edge.to, .local = target_local },
-                ref.node,
+                .{ .file = import_edge.to, .local = chained.symbol },
+                chained.node,
             );
         }
     }
 
     return graph;
-}
-
-/// If `node` is used as the base of a field access (`node.field`), that
-/// field's name. `null` if `node` isn't a field-access base.
-fn fieldAccessName(semantic: *const Semantic, node: Semantic.Ast.Node.Index) ?[]const u8 {
-    const parent = semantic.node_links.getParent(node) orelse return null;
-    if (semantic.parse.ast.nodeTag(parent) != .field_access) return null;
-    const data = semantic.parse.ast.nodeData(parent).node_and_token;
-    if (data[0] != node) return null;
-    return semantic.tokenSlice(data[1]);
-}
-
-fn findExport(semantic: *const Semantic, name: []const u8) ?Semantic.Symbol.Id {
-    for (semantic.symbols.getExports(FILE_ROOT_SYMBOL).items) |id| {
-        if (std.mem.eql(u8, semantic.symbols.get(id).name, name)) return id;
-    }
-    return null;
 }

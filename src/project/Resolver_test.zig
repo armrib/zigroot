@@ -55,6 +55,48 @@ test "storage.start() produces a cross-file edge to storage.zig's start" {
     try t.expect(outgoing[0].eql(.{ .file = storage_id, .local = start_sym }));
 }
 
+test "storage.Inner.run() chains a cross-file edge through a nested container" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    storage.Inner.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub const Inner = struct {
+        \\    pub fn run() void {}
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const main_id = try project.addRoot(root_path);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    const main_semantic = &project.file(main_id).semantic;
+    const main_sym = main_semantic.symbols.getSymbolNamed("main").?;
+
+    const storage_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
+    } else unreachable;
+    const run_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("run").?;
+
+    const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
+    try t.expectEqual(@as(usize, 1), outgoing.len);
+    try t.expect(outgoing[0].eql(.{ .file = storage_id, .local = run_sym }));
+}
+
 test "a symbol only reachable across an @import is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-6. Implemented so far:
+Status: Phase 0-7. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -37,9 +37,13 @@ Status: Phase 0-6. Implemented so far:
   storage.start();` into a cross-file `SymbolGraph` edge, by matching a
   member-access reference on an import binding against the target file's
   exported symbols (`src/project/Resolver.zig`).
+- `FieldChain`: resolves `Foo.bar()` and `Outer.Inner.run()` static-member
+  chains through ZLint's `Symbol.exports`, both same-file (`SymbolGraph`)
+  and across an `@import` boundary (`Resolver`) — no type inference, just
+  container graph traversal (`src/project/FieldChain.zig`).
 
-Not yet implemented: `Foo.bar()` static-member and instance-method
-resolution, roots beyond `main`/`export` (tests, `pub` policy), confidence
+Not yet implemented: instance-method resolution (needs real type
+inference), roots beyond `main`/`export` (tests, `pub` policy), confidence
 levels for unresolved edges, SCC reporting. See `docs/ROADMAP.md` for the
 full phase plan.
 
@@ -82,6 +86,7 @@ src/
     Roots.zig                 automatic reachability roots (main, export)
     Reachability.zig          BFS over SymbolGraph + Resolver edges from Roots
     Resolver.zig              cross-file Symbol -> Symbol edges via @import
+    FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution
   main.zig                    CLI
 vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```
