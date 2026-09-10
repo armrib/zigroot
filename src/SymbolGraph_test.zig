@@ -432,6 +432,67 @@ test "a function edges to the fields of an anonymous struct behind its error-uni
     try t.expect(found);
 }
 
+test "a function edges to the members of an anonymous error set in its error-union return type" {
+    var sem = try build(
+        \\fn cmp(a: i32, b: i32) error{TypeMismatch}!i32 {
+        \\    if (a < 0) return error.TypeMismatch;
+        \\    return a - b;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const cmp_id = sem.symbols.getSymbolNamed("cmp").?;
+    const mismatch_id = sem.symbols.getSymbolNamed("TypeMismatch").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = cmp_id });
+    var found = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = mismatch_id })) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a function edges to every member of a multi-member anonymous error set" {
+    var sem = try build(
+        \\fn cmp(a: i32, b: i32) error{ TypeMismatch, Overflow }!i32 {
+        \\    if (a < 0) return error.TypeMismatch;
+        \\    if (b < 0) return error.Overflow;
+        \\    return a - b;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const cmp_id = sem.symbols.getSymbolNamed("cmp").?;
+    const mismatch_id = sem.symbols.getSymbolNamed("TypeMismatch").?;
+    const overflow_id = sem.symbols.getSymbolNamed("Overflow").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = cmp_id });
+    var found_mismatch = false;
+    var found_overflow = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = mismatch_id })) found_mismatch = true;
+        if (edge.to.eql(.{ .file = file, .local = overflow_id })) found_overflow = true;
+    }
+    try t.expect(found_mismatch);
+    try t.expect(found_overflow);
+}
+
 test "a function edges to the fields of an anonymous struct in a parameter's type" {
     var sem = try build(
         \\fn f(p: struct { anon_field: bool }) void { _ = p; }

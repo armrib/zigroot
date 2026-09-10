@@ -125,6 +125,9 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// from the anonymous container's member nodes) against the container
 /// node `anonymousContainer` unwraps from the return-type/parameter
 /// expression (a leading pointer/slice/array, an `?`, or a `!` error union).
+/// An inline `error{...}` on the *error* side of that same `!` gets the
+/// same treatment via `anonymousErrorSet`/`edgeErrorSetMembers`, though its
+/// members can't be found through `decl_index` — see `edgeErrorSetMembers`.
 ///
 /// Phase 26: a `type`-returning function (`fn Foo(comptime N: usize) type`)
 /// doesn't spell its actual container in the signature at all — Phase 25's
@@ -261,8 +264,59 @@ fn edgeAnonymousContainerFields(
     type_node: Semantic.Ast.Node.Index,
 ) Allocator.Error!void {
     const ast = &semantic.parse.ast;
-    const container_node = anonymousContainer(ast, type_node) orelse return;
-    try edgeContainerFields(gpa, graph, file, decl_index, from, ast, container_node);
+    if (anonymousContainer(ast, type_node)) |container_node| {
+        try edgeContainerFields(gpa, graph, file, decl_index, from, ast, container_node);
+    }
+    if (anonymousErrorSet(ast, type_node)) |error_set_node| {
+        try edgeErrorSetMembers(gpa, graph, file, semantic, from, error_set_node);
+    }
+}
+
+/// Unwraps the same leading pointer/slice/array/`?` wrappers as
+/// `anonymousContainer`, but follows the *error-set* side of an
+/// `.error_union` (`lhs!rhs`'s `lhs`) instead of its payload, stopping at an
+/// inline `error{...}` there. `null` if `node` never bottoms out at one —
+/// including when the error union's error side isn't spelled as an inline
+/// error set at all (e.g. a named error set or an inferred `!`).
+fn anonymousErrorSet(ast: *const Semantic.Ast, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    var cur = node;
+    while (true) {
+        if (ast.fullPtrType(cur)) |ptr| {
+            cur = ptr.ast.child_type;
+        } else if (ast.fullArrayType(cur)) |array| {
+            cur = array.ast.elem_type;
+        } else switch (ast.nodeTag(cur)) {
+            .optional_type => cur = ast.nodeData(cur).node,
+            .error_union => {
+                const error_set_node = ast.nodeData(cur).node_and_node[0];
+                return if (ast.nodeTag(error_set_node) == .error_set_decl) error_set_node else null;
+            },
+            else => return null,
+        }
+    }
+}
+
+/// A `.definite` edge from `from` to each member of the inline
+/// `error{...}` at `error_set_node`. Unlike a struct/union/enum's fields,
+/// an error set's members aren't individual AST nodes — ZLint's
+/// `Builder.visitErrorSetDecl` declares every member with `.declaration_node
+/// = error_set_node` (the whole `error_set_decl`), so all of them share one
+/// `decl`. That rules out `decl_index`/`edgeContainerFields`'s node-matching
+/// (one symbol per node); this instead scans every symbol in the file for a
+/// `decl` equal to `error_set_node`, which recovers all of them.
+fn edgeErrorSetMembers(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    file: FileId,
+    semantic: *const Semantic,
+    from: Semantic.Symbol.Id,
+    error_set_node: Semantic.Ast.Node.Index,
+) Allocator.Error!void {
+    var it = semantic.symbols.iter();
+    while (it.next()) |sym_id| {
+        if (semantic.symbols.get(sym_id).decl != error_set_node) continue;
+        try graph.addEdge(gpa, .{ .file = file, .local = from }, .{ .file = file, .local = sym_id }, error_set_node, .definite);
+    }
 }
 
 /// A `.definite` edge from `from` to each of `container_node`'s field/
