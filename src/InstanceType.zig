@@ -62,6 +62,20 @@
 //! how to resolve a call-init variable's type across `@import` boundaries,
 //! can recurse into `seq` itself and reuse that.
 //!
+//! Phase 28: `const srv = self.srv;` — a variable with no explicit type
+//! annotation, initialized from a plain same-file identifier/`.field` chain
+//! (not a call, not a struct literal, not an `address_of`) — has no
+//! type-position node of its own for `declaredTypeNodes` to find, unlike the
+//! `Foo{...}`/`&h.arr[1]` shapes above. `fieldAccessInitSource` walks the
+//! initializer's base identifier through `FieldChain.resolveChain` (same as
+//! `optionalPayloadSource`) to find the field/variable the chain lands on —
+//! here, `ReqCtx.srv` — and `resolve`/`crossFileRoot` recurse into *that*
+//! symbol's own declared type (`*Server`) the same way they do for a
+//! payload's condition expression. Both hops here are syntactic: `self`'s
+//! type comes from Phase 18, `srv`'s from Phase 22 — nothing is inferred
+//! from a call return, unlike the `inflight.cont.call(...)` shape (`inflight`
+//! from `hashmap.fetchRemove(...).value`) that's still out of scope.
+//!
 //! `resolve` only resolves a type expression that stays within one file.
 //! `crossFileRoot` is the other half, for `Resolver`: when the type
 //! expression's root identifier doesn't resolve to anything with the
@@ -91,6 +105,9 @@ pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Se
         return resolve(semantic, owner_map, source);
     }
     if (forElementSource(semantic, owner_map, sym_id)) |source| {
+        return resolve(semantic, owner_map, source);
+    }
+    if (fieldAccessInitSource(semantic, owner_map, sym_id)) |source| {
         return resolve(semantic, owner_map, source);
     }
     if (addressOfChainTarget(semantic, owner_map, sym_id)) |target| return target;
@@ -351,6 +368,43 @@ fn addressOfChainTarget(semantic: *const Semantic, owner_map: *const OwnerMap, s
     return chain.result.symbol;
 }
 
+/// If `sym_id` is a variable (`var`/`const`) with no explicit type
+/// annotation, declared as `const srv = self.srv;` — a plain same-file
+/// identifier or `.field` chain (not a call, not a struct literal, not an
+/// `address_of`) — the field/variable symbol that chain resolves to (here,
+/// `ReqCtx.srv`), found the same way `optionalPayloadSource` finds the
+/// symbol behind an `if`/`while` payload's condition expression: walking the
+/// initializer's base identifier through `FieldChain.resolveChain`. `resolve`
+/// and `crossFileRoot` recurse into that symbol's own declared type, rather
+/// than this returning it directly, since `resolveChain`'s walk only
+/// redirects through a field's declared type to look for a *further* hop —
+/// with none here, it hands back the field itself. `null` if `sym_id` isn't
+/// such a variable, already has an explicit type annotation, or its
+/// initializer isn't a same-file identifier/`.field` chain.
+fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    switch (ast.nodeTag(init_node)) {
+        .identifier, .field_access => {},
+        else => return null,
+    }
+
+    var base_node = init_node;
+    while (ast.nodeTag(base_node) == .field_access) {
+        base_node = ast.nodeData(base_node).node_and_token[0];
+    }
+    const base_sym = referenceAt(semantic, base_node) orelse return null;
+
+    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+    return chain.result.symbol;
+}
+
 pub const CrossFileRoot = struct {
     /// The same-file symbol the type expression's root identifier
     /// resolves to — expected to be an `@import` binding, though this
@@ -375,6 +429,9 @@ pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_
         return crossFileRoot(semantic, owner_map, source);
     }
     if (forElementSource(semantic, owner_map, sym_id)) |source| {
+        return crossFileRoot(semantic, owner_map, source);
+    }
+    if (fieldAccessInitSource(semantic, owner_map, sym_id)) |source| {
         return crossFileRoot(semantic, owner_map, source);
     }
     const candidates = declaredTypeNodes(semantic, sym_id);

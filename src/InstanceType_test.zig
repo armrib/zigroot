@@ -592,6 +592,102 @@ test "crossFileRoot finds the base and field of a pointer-typed container field"
     try t.expectEqualStrings("Widget", root.field);
 }
 
+test "a field-access-initialized variable resolves to the field's declared type's symbol" {
+    var sem = try build(
+        \\const Server = struct {
+        \\    pub fn drive(self: *Server) void { _ = self; }
+        \\};
+        \\const ReqCtx = struct {
+        \\    srv: *Server,
+        \\    pub fn finish(self: *ReqCtx) void {
+        \\        const srv = self.srv;
+        \\        srv.drive();
+        \\    }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const server_id = sem.symbols.getSymbolNamed("Server").?;
+    const srv_id = sem.symbols.getSymbolNamed("srv").?;
+
+    try t.expectEqual(server_id, InstanceType.resolve(&sem, &owner_map, srv_id).?);
+}
+
+test "a field-access-initialized variable with an explicit type annotation still resolves via the annotation" {
+    var sem = try build(
+        \\const Server = struct {
+        \\    pub fn drive(self: *Server) void { _ = self; }
+        \\};
+        \\const ReqCtx = struct {
+        \\    srv: *Server,
+        \\    pub fn finish(self: *ReqCtx) void {
+        \\        const srv: *Server = self.srv;
+        \\        srv.drive();
+        \\    }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const server_id = sem.symbols.getSymbolNamed("Server").?;
+    const srv_id = sem.symbols.getSymbolNamed("srv").?;
+
+    try t.expectEqual(server_id, InstanceType.resolve(&sem, &owner_map, srv_id).?);
+}
+
+test "a call-initialized variable is still unresolved (field-access-init handling doesn't overreach)" {
+    var sem = try build(
+        \\const Server = struct {
+        \\    pub fn drive(self: *Server) void { _ = self; }
+        \\};
+        \\fn makeServer() Server { return undefined; }
+        \\fn a() void {
+        \\    const srv = makeServer();
+        \\    _ = &srv;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const srv_id = sem.symbols.getSymbolNamed("srv").?;
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, srv_id));
+}
+
+test "crossFileRoot finds the base and field of a field-access-initialized variable's cross-file field type" {
+    var sem = try build(
+        \\const storage = 0;
+        \\const ReqCtx = struct {
+        \\    srv: *storage.Server,
+        \\    pub fn finish(self: *ReqCtx) void {
+        \\        const srv = self.srv;
+        \\        _ = &srv;
+        \\    }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const storage_id = sem.symbols.getSymbolNamed("storage").?;
+    const srv_id = sem.symbols.getSymbolNamed("srv").?;
+
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, srv_id).?;
+    try t.expectEqual(storage_id, root.base);
+    try t.expectEqualStrings("Server", root.field);
+}
+
 test "a non-variable symbol resolves to null" {
     var sem = try build(
         \\const Foo = struct {};
