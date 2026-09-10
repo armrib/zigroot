@@ -183,6 +183,22 @@ pub fn parseInto(
             continue;
         }
 
+        if (std.mem.eql(u8, field, "addAnonymousImport")) {
+            if (call.ast.params.len >= 2 and tree.nodeTag(call.ast.params[0]) == .string_literal) {
+                if (rootSourceFileFromOptions(&tree, call.ast.params[1], &struct_buf)) |path_tok| {
+                    const import_name = parseStringLiteral(gpa, &tree, tree.nodeMainToken(call.ast.params[0])) catch continue;
+                    errdefer gpa.free(import_name);
+                    const path = parseStringLiteral(gpa, &tree, path_tok) catch {
+                        gpa.free(import_name);
+                        continue;
+                    };
+                    defer gpa.free(path);
+                    try addModulePath(gpa, result, import_name, path);
+                }
+            }
+            continue;
+        }
+
         if (!std.mem.eql(u8, field, "addImport")) continue;
         if (call.ast.params.len < 2) continue;
 

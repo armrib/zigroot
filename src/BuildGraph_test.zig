@@ -75,6 +75,24 @@ test "resolves a module published with b.addModule and wired into another module
     try t.expectEqualStrings("db-compiler/src/root.zig", paths[0]);
 }
 
+test "resolves a module bound with addAnonymousImport, whose module and options are inline" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const bench_mod = b.createModule(.{ .root_source_file = b.path("src/bench_runner.zig") });
+        \\    bench_mod.addAnonymousImport("bench.zig", .{ .root_source_file = b.path("apps/site-build/src/bench.zig") });
+        \\    const exe = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
+        \\    _ = exe;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("bench.zig").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("apps/site-build/src/bench.zig", paths[0]);
+}
+
 test "a module sourced from a dependency stays unresolved" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");
