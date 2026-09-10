@@ -53,18 +53,75 @@ pub fn deinit(self: *Project) void {
 /// `b.createModule(...)` + `.addImport("name", ...)` resolve to files
 /// instead of being reported unresolved. Must be called before `addRoot`
 /// for roots that use those imports.
+///
+/// Also follows local `const x = @import("relative/file.zig");` bindings
+/// transitively into sibling files that `build_zig_path` delegates its
+/// actual module wiring to (a thin top-level aggregator calling into a
+/// per-app `build.zig` helper, say), merging every file's
+/// `createModule`/`addModule`/`addImport` shapes into the same graph. Every
+/// `b.path(...)` string collected this way stays resolved against
+/// `build_zig_path`'s own directory — the real build root, since `b.path`
+/// always resolves relative to the top-level build script regardless of
+/// which file the call is lexically written in — not the directory of
+/// whichever file it was found in.
 pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
     const canonical = try self.canonicalize(build_zig_path);
     defer self.gpa.free(canonical);
 
+    self.build_graph_dir = try self.gpa.dupe(u8, std.fs.path.dirname(canonical) orelse ".");
+    errdefer {
+        self.gpa.free(self.build_graph_dir);
+        self.build_graph_dir = "";
+    }
+
+    var graph: BuildGraph = .empty;
+    errdefer graph.deinit(self.gpa);
+
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = visited.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.*);
+        visited.deinit(self.gpa);
+    }
+
+    try self.scanBuildFile(&graph, &visited, canonical);
+
+    self.build_graph = graph;
+}
+
+/// Scans one `build.zig` (or a file it locally `@import`s) into `graph`,
+/// then recurses into every local-file `@import` it found — see
+/// `loadBuildGraph`. `visited` guards against re-scanning the same file
+/// twice (an import cycle, or the same helper imported from two places).
+fn scanBuildFile(
+    self: *Project,
+    graph: *BuildGraph,
+    visited: *std.StringHashMapUnmanaged(void),
+    canonical: []const u8,
+) anyerror!void {
+    if (visited.contains(canonical)) return;
+    try visited.put(self.gpa, try self.gpa.dupe(u8, canonical), {});
+
     const source = try File.readFileSentinel(self.gpa, canonical);
     defer self.gpa.free(source);
 
-    var graph = try BuildGraph.parse(self.gpa, source);
-    errdefer graph.deinit(self.gpa);
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| self.gpa.free(p);
+        file_imports.deinit(self.gpa);
+    }
 
-    self.build_graph_dir = try self.gpa.dupe(u8, std.fs.path.dirname(canonical) orelse ".");
-    self.build_graph = graph;
+    try BuildGraph.parseInto(self.gpa, graph, source, &file_imports);
+
+    const dir = std.fs.path.dirname(canonical) orelse ".";
+    for (file_imports.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        const target_canonical = self.canonicalize(target_path) catch continue;
+        defer self.gpa.free(target_canonical);
+
+        try self.scanBuildFile(graph, visited, target_canonical);
+    }
 }
 
 pub fn file(self: *const Project, id: FileId) *const File {

@@ -55,17 +55,49 @@ pub fn resolve(self: *const BuildGraph, name: []const u8) ?[]const []const u8 {
 
 /// Parses `source` (a `build.zig`'s contents) and extracts its local
 /// module bindings. `source` need not be error-free; a `build.zig` with
-/// parse errors just yields an empty or partial graph.
+/// parse errors just yields an empty or partial graph. Doesn't follow
+/// local `@import("*.zig")`s into sibling files — see `parseInto` for
+/// that (this is a thin single-file wrapper around it, kept for callers
+/// — and existing tests — that only care about one file).
 pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
+    var result: BuildGraph = .empty;
+    errdefer result.deinit(gpa);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| gpa.free(p);
+        file_imports.deinit(gpa);
+    }
+
+    try parseInto(gpa, &result, source, &file_imports);
+    return result;
+}
+
+/// Scans `source` and merges the local module bindings it defines into
+/// `result`, which may already hold bindings merged in from another file
+/// in the same build script's local-`@import` chain (see
+/// `Project.loadBuildGraph`, which drives the recursion across files).
+/// Every top-level `const x = @import("relative/file.zig");` local-file
+/// import is appended (as an owned, caller-freed copy) to `file_imports`
+/// so the caller can resolve it relative to *this* file's directory, load
+/// it, and recurse — while every `b.path(...)` string collected here (and
+/// by the recursive calls) stays a bare relative path, resolved by the
+/// caller against the original build root regardless of which file it
+/// was found in, matching how `b.path` actually behaves at runtime.
+/// `source` need not be error-free; a file with parse errors just
+/// contributes nothing.
+pub fn parseInto(
+    gpa: Allocator,
+    result: *BuildGraph,
+    source: [:0]const u8,
+    file_imports: *std.ArrayListUnmanaged([]u8),
+) !void {
     var tree = try Ast.parse(gpa, source, .zig);
     defer tree.deinit(gpa);
 
     // local variable name -> root_source_file path (borrowed from `tree`).
     var bindings: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer bindings.deinit(gpa);
-
-    var result: BuildGraph = .empty;
-    errdefer result.deinit(gpa);
 
     var call_buf: [1]Ast.Node.Index = undefined;
     var struct_buf: [2]Ast.Node.Index = undefined;
@@ -91,7 +123,14 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
                     const path = parseStringLiteral(gpa, &tree, found.path) catch continue;
                     errdefer gpa.free(path);
                     try bindings.put(gpa, var_name, path);
+                    continue;
                 }
+            }
+
+            if (localFileImportPath(&tree, init_node)) |path_tok| {
+                const path = parseStringLiteral(gpa, &tree, path_tok) catch continue;
+                errdefer gpa.free(path);
+                try file_imports.append(gpa, path);
             }
             continue;
         }
@@ -100,7 +139,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
             for (struct_init.ast.fields) |field_value| {
                 const name_tok = tree.firstToken(field_value) - 2;
                 if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "imports")) continue;
-                try scanImportsField(gpa, &tree, &bindings, &result, field_value);
+                try scanImportsField(gpa, &tree, &bindings, result, field_value);
             }
             continue;
         }
@@ -117,7 +156,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
                     continue;
                 };
                 defer gpa.free(path);
-                try addModulePath(gpa, &result, import_name, path);
+                try addModulePath(gpa, result, import_name, path);
             }
             continue;
         }
@@ -136,15 +175,33 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
             continue;
         };
 
-        try addModulePath(gpa, &result, import_name, rel_path);
+        try addModulePath(gpa, result, import_name, rel_path);
     }
 
     // `bindings`' values are owned by `result` iff still referenced; free
     // whichever weren't picked up by an `addImport`.
     var bit = bindings.iterator();
     while (bit.next()) |entry| gpa.free(entry.value_ptr.*);
+}
 
-    return result;
+/// If `node` is `@import("relative/file.zig")` — a local-file import
+/// specifier (ends in `.zig`, as opposed to a package name like `"std"`
+/// or a named module like `"storage"`) — returns the token index of the
+/// string literal.
+fn localFileImportPath(tree: *const Ast, node: Ast.Node.Index) ?Ast.TokenIndex {
+    switch (tree.nodeTag(node)) {
+        .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => {},
+        else => return null,
+    }
+    if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@import")) return null;
+
+    var buf: [2]Ast.Node.Index = undefined;
+    const params = tree.builtinCallParams(&buf, node) orelse return null;
+    if (params.len != 1 or tree.nodeTag(params[0]) != .string_literal) return null;
+
+    const tok = tree.nodeMainToken(params[0]);
+    if (!std.mem.endsWith(u8, tree.tokenSlice(tok), ".zig\"")) return null;
+    return tok;
 }
 
 /// If `node` is `<ident>.createModule(.{ ..., .root_source_file =

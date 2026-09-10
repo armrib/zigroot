@@ -152,3 +152,66 @@ test "loadBuildGraph resolves a named-module @import to its file" {
     try t.expectEqual(@as(usize, 2), project.files.items.len);
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
+
+test "loadBuildGraph follows a split-out helper file's b.path() calls relative to the build root, not the helper's own directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\const helper = @import("build/helper.zig");
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = helper.wire(b, b.standardTargetOptions(.{}), b.standardOptimizeOption(.{})),
+        \\    });
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "build/helper.zig",
+        \\const std = @import("std");
+        \\
+        \\pub fn wire(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+        \\    const lib_mod = b.createModule(.{
+        \\        .root_source_file = b.path("lib/mod.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\    const main = b.createModule(.{
+        \\        .root_source_file = b.path("src/main.zig"),
+        \\        .target = target,
+        \\        .optimize = optimize,
+        \\    });
+        \\    main.addImport("lib", lib_mod);
+        \\    return main;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const lib = @import("lib");
+        \\pub fn main() void {
+        \\    lib.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "lib/mod.zig",
+        \\pub fn run() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
+}

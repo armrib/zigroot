@@ -221,3 +221,29 @@ test "an import name addImport'd once per OS branch keeps every candidate" {
     try t.expectEqualStrings("src/linux.zig", paths[0]);
     try t.expectEqualStrings("src/windows.zig", paths[1]);
 }
+
+test "parseInto collects local-file @import specifiers, not package/module names" {
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| t.allocator.free(p);
+        file_imports.deinit(t.allocator);
+    }
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\const helper = @import("build/helper.zig");
+        \\const zlint = @import("zlint");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = helper;
+        \\    _ = zlint;
+        \\    _ = b;
+        \\}
+        \\
+    , &file_imports);
+
+    try t.expectEqual(@as(usize, 1), file_imports.items.len);
+    try t.expectEqualStrings("build/helper.zig", file_imports.items[0]);
+}
