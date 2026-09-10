@@ -82,6 +82,15 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
             continue;
         }
 
+        if (tree.fullStructInit(&struct_buf, node)) |struct_init| {
+            for (struct_init.ast.fields) |field_value| {
+                const name_tok = tree.firstToken(field_value) - 2;
+                if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "imports")) continue;
+                try scanImportsField(gpa, &tree, &bindings, &result, field_value);
+            }
+            continue;
+        }
+
         const call = tree.fullCall(&call_buf, node) orelse continue;
         const field = fieldAccessName(&tree, call.ast.fn_expr) orelse continue;
         if (!std.mem.eql(u8, field, "addImport")) continue;
@@ -98,24 +107,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
             continue;
         };
 
-        const gop = try result.modules.getOrPut(gpa, import_name);
-        if (gop.found_existing) {
-            gpa.free(import_name);
-        } else {
-            gop.key_ptr.* = import_name;
-            gop.value_ptr.* = .empty;
-        }
-
-        const dup_path = try gpa.dupe(u8, rel_path);
-        errdefer gpa.free(dup_path);
-        for (gop.value_ptr.items) |existing| {
-            if (std.mem.eql(u8, existing, dup_path)) {
-                gpa.free(dup_path);
-                break;
-            }
-        } else {
-            try gop.value_ptr.append(gpa, dup_path);
-        }
+        try addModulePath(gpa, &result, import_name, rel_path);
     }
 
     // `bindings`' values are owned by `result` iff still referenced; free
@@ -155,6 +147,74 @@ fn rootSourceFileOfCreateModule(
         return tree.nodeMainToken(arg);
     }
     return null;
+}
+
+/// Records `import_name -> rel_path` in `result.modules`, taking ownership
+/// of `import_name` and copying `rel_path`. Dedupes candidates already
+/// recorded for the same name.
+fn addModulePath(gpa: Allocator, result: *BuildGraph, import_name: []u8, rel_path: []const u8) !void {
+    const gop = try result.modules.getOrPut(gpa, import_name);
+    if (gop.found_existing) {
+        gpa.free(import_name);
+    } else {
+        gop.key_ptr.* = import_name;
+        gop.value_ptr.* = .empty;
+    }
+
+    const dup_path = try gpa.dupe(u8, rel_path);
+    errdefer gpa.free(dup_path);
+    for (gop.value_ptr.items) |existing| {
+        if (std.mem.eql(u8, existing, dup_path)) {
+            gpa.free(dup_path);
+            return;
+        }
+    }
+    try gop.value_ptr.append(gpa, dup_path);
+}
+
+/// Scans an `.imports = &.{ .{ .name = "...", .module = <ident> }, ... }`
+/// options-struct field (the inline alternative to chained `addImport`
+/// calls), binding each string name to the path already recorded for its
+/// `.module` identifier in `bindings`.
+fn scanImportsField(
+    gpa: Allocator,
+    tree: *const Ast,
+    bindings: *const std.StringHashMapUnmanaged([]const u8),
+    result: *BuildGraph,
+    field_value: Ast.Node.Index,
+) !void {
+    const inner = if (tree.nodeTag(field_value) == .address_of)
+        tree.nodeData(field_value).node
+    else
+        field_value;
+
+    var array_buf: [2]Ast.Node.Index = undefined;
+    const array_init = tree.fullArrayInit(&array_buf, inner) orelse return;
+
+    var entry_buf: [2]Ast.Node.Index = undefined;
+    for (array_init.ast.elements) |elem| {
+        const entry = tree.fullStructInit(&entry_buf, elem) orelse continue;
+
+        var import_name: ?[]u8 = null;
+        var module_path: ?[]const u8 = null;
+        for (entry.ast.fields) |entry_field| {
+            const name_tok = tree.firstToken(entry_field) - 2;
+            const field_name = tree.tokenSlice(name_tok);
+            if (std.mem.eql(u8, field_name, "name")) {
+                if (tree.nodeTag(entry_field) != .string_literal) continue;
+                import_name = parseStringLiteral(gpa, tree, tree.nodeMainToken(entry_field)) catch null;
+            } else if (std.mem.eql(u8, field_name, "module")) {
+                module_path = pathForBinding(tree, bindings, entry_field);
+            }
+        }
+
+        const name = import_name orelse continue;
+        const path = module_path orelse {
+            gpa.free(name);
+            continue;
+        };
+        try addModulePath(gpa, result, name, path);
+    }
 }
 
 /// Resolves `value_node` (an `addImport` second argument) to a

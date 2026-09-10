@@ -44,6 +44,32 @@ test "a module sourced from a dependency stays unresolved" {
     try t.expectEqual(@as(?[]const []const u8, null), graph.resolve("zlint"));
 }
 
+test "resolves a module bound via an inline .imports field" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const myiam_mod = b.createModule(.{
+        \\        .root_source_file = b.path("../../../sdks/iam/zig/iam-verify.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "chat",
+        \\        .root_module = b.createModule(.{
+        \\            .root_source_file = b.path("src/main.zig"),
+        \\            .imports = &.{
+        \\                .{ .name = "myiam-verify", .module = myiam_mod },
+        \\            },
+        \\        }),
+        \\    });
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("myiam-verify").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("../../../sdks/iam/zig/iam-verify.zig", paths[0]);
+}
+
 test "an addImport of an unrelated identifier is ignored, not crashing" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");
