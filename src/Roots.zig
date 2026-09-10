@@ -121,14 +121,29 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
 
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
-            const instance_ty = InstanceType.resolve(semantic, &f.owner_map, sym_id);
-            const cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, &f.owner_map, sym_id) else null;
-            const call_instance = if (instance_ty == null and cross_instance == null) Resolver.callInstanceType(project, f.id, sym_id) else null;
-            const import_target = importTarget(project, f.id, sym_id);
+            // These four resolutions are only ever used inside the
+            // `isInTestScope` branch below, so they're computed lazily on
+            // the first test-scope reference found (if any) rather than
+            // unconditionally per symbol — `importTarget` in particular is
+            // otherwise a full-project-import-edges scan paid for every
+            // symbol regardless of whether it ever has a test reference.
+            var resolved = false;
+            var instance_ty: ?Semantic.Symbol.Id = null;
+            var cross_instance: ?CrossInstanceType = null;
+            var call_instance: ?SymbolId = null;
+            var import_target: ?FileId = null;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
                 if (!isInTestScope(&semantic.scopes, ref.scope)) continue;
+
+                if (!resolved) {
+                    instance_ty = InstanceType.resolve(semantic, &f.owner_map, sym_id);
+                    cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, &f.owner_map, sym_id) else null;
+                    call_instance = if (instance_ty == null and cross_instance == null) Resolver.callInstanceType(project, f.id, sym_id) else null;
+                    import_target = importTarget(project, f.id, sym_id);
+                    resolved = true;
+                }
 
                 try roots.add(gpa, .{ .file = f.id, .local = sym_id }, .@"test");
 
@@ -227,8 +242,7 @@ fn crossInstanceType(project: *const Project, file_id: FileId, semantic: *const 
 /// The target file of one of `file_id`'s `@import` edges whose binding
 /// symbol is `base`, if any. Mirrors `Resolver.importTarget`.
 fn importTarget(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?FileId {
-    for (project.import_graph.edges.items) |edge| {
-        if (edge.from != file_id) continue;
+    for (project.import_graph.edgesFrom(file_id)) |edge| {
         const binding = project.file(edge.from).owner_map.get(edge.node) orelse continue;
         if (binding == base) return edge.to;
     }

@@ -234,8 +234,7 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
 /// One of `file_id`'s `@import` edges whose binding symbol is `base`, if
 /// any.
 fn importEdge(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?ImportGraph.Edge {
-    for (project.import_graph.edges.items) |edge| {
-        if (edge.from != file_id) continue;
+    for (project.import_graph.edgesFrom(file_id)) |edge| {
         const binding = project.file(edge.from).owner_map.get(edge.node) orelse continue;
         if (binding == base) return edge;
     }
