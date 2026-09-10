@@ -70,6 +70,31 @@ test "resolves a module bound via an inline .imports field" {
     try t.expectEqualStrings("../../../sdks/iam/zig/iam-verify.zig", paths[0]);
 }
 
+test "resolves a module whose root_source_file goes through a b.path pass-through helper" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\fn srcPath(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
+        \\    return b.path(sub_path);
+        \\}
+        \\pub fn build(b: *std.Build) void {
+        \\    const helper_mod = b.createModule(.{
+        \\        .root_source_file = srcPath(b, "src/helper.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("helper", helper_mod);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("helper").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("src/helper.zig", paths[0]);
+}
+
 test "an addImport of an unrelated identifier is ignored, not crashing" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");

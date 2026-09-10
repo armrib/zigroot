@@ -6,7 +6,11 @@
 //! This is a syntactic scan over `build.zig`'s AST, not a real evaluation
 //! of the build script (that would require running it). Modules that come
 //! from `b.dependency(...).module(...)` aren't backed by a local file and
-//! are left unresolved, same as before this phase existed.
+//! are left unresolved, same as before this phase existed. A thin local
+//! wrapper around `b.path(...)` (`.root_source_file = srcPath(b, "...")`
+//! where `srcPath` just returns `b.path(sub_path)`, maybe with a side
+//! effect) is inlined through; anything with a more complex body is left
+//! unresolved.
 //!
 //! An import name can resolve to more than one candidate path: when
 //! `addImport("name", ...)` is called more than once for the same name
@@ -120,7 +124,10 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
 
 /// If `node` is `<ident>.createModule(.{ ..., .root_source_file =
 /// b.path("...") , ... })`, returns the token index of that inner string
-/// literal.
+/// literal. Also recognizes a single-argument call to a locally-defined
+/// pass-through helper (`.root_source_file = srcPath(b, "...")` where
+/// `srcPath`'s body is exactly `return b.path(sub_path);`) and inlines
+/// through it to the same string literal at the call site.
 fn rootSourceFileOfCreateModule(
     tree: *const Ast,
     node: Ast.Node.Index,
@@ -139,12 +146,80 @@ fn rootSourceFileOfCreateModule(
         if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_source_file")) continue;
         var inner_buf: [1]Ast.Node.Index = undefined;
         const path_call = tree.fullCall(&inner_buf, field_value) orelse return null;
-        const path_field = fieldAccessName(tree, path_call.ast.fn_expr) orelse return null;
-        if (!std.mem.eql(u8, path_field, "path")) return null;
-        if (path_call.ast.params.len < 1) return null;
-        const arg = path_call.ast.params[0];
-        if (tree.nodeTag(arg) != .string_literal) return null;
-        return tree.nodeMainToken(arg);
+        if (fieldAccessName(tree, path_call.ast.fn_expr)) |path_field| {
+            if (!std.mem.eql(u8, path_field, "path")) return null;
+            if (path_call.ast.params.len < 1) return null;
+            const arg = path_call.ast.params[0];
+            if (tree.nodeTag(arg) != .string_literal) return null;
+            return tree.nodeMainToken(arg);
+        }
+        return pathThroughHelperCall(tree, path_call);
+    }
+    return null;
+}
+
+/// If `call` is a single-argument call to a locally-defined function whose
+/// body is exactly `return <recv>.path(<param>);` (a thin pass-through
+/// wrapper around `b.path(...)`, e.g. one that also validates the path
+/// exists first), resolves through it to the string-literal token passed at
+/// `call`'s own call site — the same shape a direct `b.path("...")` call
+/// would yield. Anything with a more complex body is left unresolved.
+fn pathThroughHelperCall(tree: *const Ast, call: Ast.full.Call) ?Ast.TokenIndex {
+    if (tree.nodeTag(call.ast.fn_expr) != .identifier) return null;
+    const fn_name = tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr));
+
+    const fn_decl = findFnDecl(tree, fn_name) orelse return null;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = tree.fullFnProto(&proto_buf, fn_decl) orelse return null;
+    const body = tree.nodeData(fn_decl).node_and_node[1];
+
+    const param_index = passThroughPathParamIndex(tree, proto, body) orelse return null;
+    if (param_index >= call.ast.params.len) return null;
+
+    const arg = call.ast.params[param_index];
+    if (tree.nodeTag(arg) != .string_literal) return null;
+    return tree.nodeMainToken(arg);
+}
+
+/// If `body` (a function's block) is exactly one statement, `return
+/// <recv>.path(<param>);`, returns the index of `<param>` among `proto`'s
+/// parameters.
+fn passThroughPathParamIndex(tree: *const Ast, proto: Ast.full.FnProto, body: Ast.Node.Index) ?usize {
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, body) orelse return null;
+    if (stmts.len != 1) return null;
+    if (tree.nodeTag(stmts[0]) != .@"return") return null;
+    const ret_expr = tree.nodeData(stmts[0]).opt_node.unwrap() orelse return null;
+
+    var call_buf: [1]Ast.Node.Index = undefined;
+    const inner_call = tree.fullCall(&call_buf, ret_expr) orelse return null;
+    const field = fieldAccessName(tree, inner_call.ast.fn_expr) orelse return null;
+    if (!std.mem.eql(u8, field, "path")) return null;
+    if (inner_call.ast.params.len != 1) return null;
+
+    const arg = inner_call.ast.params[0];
+    if (tree.nodeTag(arg) != .identifier) return null;
+    const arg_name = tree.tokenSlice(tree.nodeMainToken(arg));
+
+    var it = proto.iterate(tree);
+    var index: usize = 0;
+    while (it.next()) |param| : (index += 1) {
+        const name_tok = param.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(name_tok), arg_name)) return index;
+    }
+    return null;
+}
+
+/// Finds a `fn <name>(...) ... { ... }` declaration anywhere in `tree`.
+fn findFnDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        const node: Ast.Node.Index = @enumFromInt(i);
+        if (tree.nodeTag(node) != .fn_decl) continue;
+        var buf: [1]Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&buf, node) orelse continue;
+        const name_tok = proto.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(name_tok), name)) return node;
     }
     return null;
 }
