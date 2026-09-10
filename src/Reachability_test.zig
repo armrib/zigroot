@@ -225,6 +225,46 @@ test "extern declarations are never reported dead" {
     }
 }
 
+test "a catch |_| discard capture is never reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn mayFail() !void {
+        \\    return error.Oops;
+        \\}
+        \\
+        \\pub fn main() !void {
+        \\    mayFail() catch |_| {};
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    for (dead.items) |d| {
+        const sym = project.file(d.id.file).semantic.symbols.get(d.id.local);
+        try t.expect(!std.mem.eql(u8, sym.name, "_"));
+    }
+}
+
 test "locals and parameters of a dead function roll up into one finding" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

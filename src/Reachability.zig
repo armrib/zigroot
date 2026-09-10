@@ -103,7 +103,9 @@ fn collectUnknown(self: *Reachability, gpa: Allocator, graph: *const SymbolGraph
 /// `@field(Foo, name)` target).
 /// Skips `extern` declarations (Phase 8): their implementation lives
 /// outside the project, so local reachability alone can never justify
-/// calling them dead.
+/// calling them dead. Also skips any symbol named `_` (e.g. a `catch |_|`
+/// or `else |_|` error capture): it's Zig's discard binding, structurally
+/// unreferenceable, so it's always "dead" and flagging it is pure noise.
 ///
 /// A dead declaration whose owner (per `OwnerMap`) is itself dead is
 /// suppressed here: everything nested inside a dead parent (locals,
@@ -126,6 +128,7 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
         while (it.next()) |local| {
             const sym = f.semantic.symbols.get(local);
             if (sym.flags.s_extern) continue;
+            if (std.mem.eql(u8, sym.name, "_")) continue;
             if (sym.flags.s_fn_param and isBareFnTypeParam(&f, sym.decl)) continue;
             const id: SymbolId = .{ .file = f.id, .local = local };
             if (self.isReachable(id)) continue;
