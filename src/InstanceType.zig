@@ -48,34 +48,61 @@ const OwnerMap = @import("OwnerMap.zig");
 /// isn't a plain identifier / same-file `.field` chain to one (e.g. it's an
 /// optional, a generic instantiation, or crosses an `@import` boundary).
 pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const candidates = declaredTypeNodes(semantic, sym_id);
+    for (candidates.slice()) |type_node| {
+        if (resolveTypeExpr(semantic, owner_map, type_node)) |ty| return ty;
+    }
+    return null;
+}
+
+/// Up to two declared-type node candidates, most-specific first.
+const TypeNodeCandidates = struct {
+    nodes: [2]Ast.Node.Index = undefined,
+    len: u8 = 0,
+
+    fn push(self: *TypeNodeCandidates, node: Ast.Node.Index) void {
+        self.nodes[self.len] = node;
+        self.len += 1;
+    }
+
+    fn slice(self: *const TypeNodeCandidates) []const Ast.Node.Index {
+        return self.nodes[0..self.len];
+    }
+};
+
+/// The declared-type node candidates to try in order for `sym_id`: a
+/// function parameter's own type node (`self: *Foo`, one leading pointer
+/// unwrapped), then an explicit variable type annotation, then an
+/// explicitly-typed struct-literal initializer. Empty if `sym_id` is
+/// neither a function parameter nor a variable, or has none of these.
+fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) TypeNodeCandidates {
+    var out: TypeNodeCandidates = .{};
     const symbol = semantic.symbols.get(sym_id);
 
     if (symbol.flags.s_fn_param) {
-        const type_node = paramTypeNode(semantic, symbol) orelse return null;
-        return resolveTypeExpr(semantic, owner_map, type_node);
+        if (paramTypeNode(semantic, symbol)) |type_node| out.push(type_node);
+        return out;
     }
 
-    if (!symbol.flags.s_variable) return null;
+    if (!symbol.flags.s_variable) return out;
 
     const ast = &semantic.parse.ast;
-    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return out;
 
-    if (decl.ast.type_node.unwrap()) |type_node| {
-        if (resolveTypeExpr(semantic, owner_map, type_node)) |ty| return ty;
+    if (decl.ast.type_node.unwrap()) |type_node| out.push(type_node);
+
+    if (decl.ast.init_node.unwrap()) |init_node| {
+        var buf: [2]Ast.Node.Index = undefined;
+        if (ast.fullStructInit(&buf, init_node)) |struct_init| {
+            if (struct_init.ast.type_expr.unwrap()) |type_expr| out.push(type_expr);
+        }
     }
-
-    const init_node = decl.ast.init_node.unwrap() orelse return null;
-    var buf: [2]Ast.Node.Index = undefined;
-    const struct_init = ast.fullStructInit(&buf, init_node) orelse return null;
-    const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
-    return resolveTypeExpr(semantic, owner_map, type_expr);
+    return out;
 }
 
 /// A function parameter symbol's declared type node, with one leading
 /// pointer unwrapped (`self: *Foo` -> `Foo`'s node, `self: Foo` -> `Foo`'s
-/// node unchanged). ZLint's `SemanticBuilder.visitFnProtoParams` sets a
-/// parameter symbol's `decl` to its `type_expr` node directly (there's no
-/// separate param node to unwrap first, unlike `fullVarDecl`).
+/// node unchanged).
 fn paramTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast.Node.Index {
     const ast = &semantic.parse.ast;
     const node = symbol.decl;
@@ -118,27 +145,11 @@ pub const CrossFileRoot = struct {
 /// continue the lookup into the target file's exports for the case where
 /// it doesn't (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
 pub fn crossFileRoot(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
-    const symbol = semantic.symbols.get(sym_id);
-
-    if (symbol.flags.s_fn_param) {
-        const type_node = paramTypeNode(semantic, symbol) orelse return null;
-        return fieldAccessRoot(semantic, type_node);
-    }
-
-    if (!symbol.flags.s_variable) return null;
-
-    const ast = &semantic.parse.ast;
-    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
-
-    if (decl.ast.type_node.unwrap()) |type_node| {
+    const candidates = declaredTypeNodes(semantic, sym_id);
+    for (candidates.slice()) |type_node| {
         if (fieldAccessRoot(semantic, type_node)) |root| return root;
     }
-
-    const init_node = decl.ast.init_node.unwrap() orelse return null;
-    var buf: [2]Ast.Node.Index = undefined;
-    const struct_init = ast.fullStructInit(&buf, init_node) orelse return null;
-    const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
-    return fieldAccessRoot(semantic, type_expr);
+    return null;
 }
 
 fn fieldAccessRoot(semantic: *const Semantic, node: Ast.Node.Index) ?CrossFileRoot {
