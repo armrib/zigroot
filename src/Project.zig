@@ -266,7 +266,7 @@ pub fn discoverZigFiles(self: *Project, dir: []const u8) !std.ArrayListUnmanaged
     var walker = try root_dir.walk(self.gpa);
     defer walker.deinit();
 
-    const skip_dirs = [_][]const u8{ ".git", "zig-cache", "zig-out", "vendor" };
+    const skip_dirs = [_][]const u8{ ".git", ".zig-cache", "zig-cache", "zig-out", "vendor" };
 
     walk: while (try walker.next()) |entry| {
         var it = std.mem.tokenizeScalar(u8, entry.path, std.fs.path.sep);
