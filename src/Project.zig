@@ -87,6 +87,18 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
     try self.scanBuildFile(&graph, &visited, canonical);
 
     self.build_graph = graph;
+
+    // Each `b.addTest` target is its own root module, never `@import`ed
+    // from anywhere — load it the same as an explicit `--root` so it (and
+    // whatever it imports) stops being reported as an orphan and its
+    // `test { ... }` blocks seed `.test` roots. Best-effort: a path that
+    // fails to resolve or load is silently skipped, same as any other
+    // best-effort result of this syntactic scan.
+    for (graph.test_roots.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        _ = self.addRoot(target_path) catch continue;
+    }
 }
 
 /// Scans one `build.zig` (or a file it locally `@import`s) into `graph`,

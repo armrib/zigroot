@@ -153,6 +153,61 @@ test "loadBuildGraph resolves a named-module @import to its file" {
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
 
+test "loadBuildGraph loads a b.addTest root_module as a project root, not an orphan" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    _ = exe;
+        \\    const test_mod = b.createModule(.{
+        \\        .root_source_file = b.path("src/tests/test_admin.zig"),
+        \\    });
+        \\    const t = b.addTest(.{ .root_module = test_mod });
+        \\    _ = t;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\pub fn main() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "src/admin.zig",
+        \\pub fn handle() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "src/tests/test_admin.zig",
+        \\const admin = @import("../admin.zig");
+        \\test "handle works" {
+        \\    admin.handle();
+        \\}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+    const test_path = try tmp.dir.realpathAlloc(t.allocator, "src/tests/test_admin.zig");
+    defer t.allocator.free(test_path);
+    const admin_path = try tmp.dir.realpathAlloc(t.allocator, "src/admin.zig");
+    defer t.allocator.free(admin_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expect(project.isReachable(test_path));
+    try t.expect(project.isReachable(admin_path));
+}
+
 test "loadBuildGraph follows a split-out helper file's b.path() calls relative to the build root, not the helper's own directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -248,6 +248,56 @@ test "parseInto collects local-file @import specifiers, not package/module names
     try t.expectEqualStrings("build/helper.zig", file_imports.items[0]);
 }
 
+test "records a b.addTest root_module bound to a local createModule variable as a test root" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const test_mod = b.createModule(.{
+        \\        .root_source_file = b.path("src/tests/test_admin.zig"),
+        \\    });
+        \\    const t = b.addTest(.{ .root_module = test_mod });
+        \\    _ = t;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.test_roots.items.len);
+    try t.expectEqualStrings("src/tests/test_admin.zig", graph.test_roots.items[0]);
+}
+
+test "records a b.addTest with an inline root_module createModule as a test root" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const t = b.addTest(.{
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests/test_http.zig") }),
+        \\    });
+        \\    _ = t;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.test_roots.items.len);
+    try t.expectEqualStrings("src/tests/test_http.zig", graph.test_roots.items[0]);
+}
+
+test "records a b.addTest using the older root_source_file shape as a test root" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const t = b.addTest(.{ .root_source_file = b.path("src/tests/test_path.zig") });
+        \\    _ = t;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.test_roots.items.len);
+    try t.expectEqualStrings("src/tests/test_path.zig", graph.test_roots.items[0]);
+}
+
 test "a local variable name reused across sibling blocks doesn't leak the shadowed binding" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");

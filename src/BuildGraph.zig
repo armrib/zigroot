@@ -33,6 +33,16 @@ const BuildGraph = @This();
 /// (e.g. an OS-conditional module). Owned (keys and every path).
 modules: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty,
 
+/// Root source file paths (relative to the `build.zig`'s directory) of
+/// every `b.addTest(.{ .root_module = ... })` (or older `.root_source_file
+/// = ...`) call found — a standalone per-file test binary, compiled and
+/// run on its own rather than `@import`ed from anywhere. `Project` loads
+/// each of these as if it were a `--root`, so its file (and the files it
+/// transitively imports) stop being orphans and its `test { ... }` blocks
+/// seed `.test` roots the same way an inline test block in an already-
+/// loaded file does. Owned.
+test_roots: std.ArrayListUnmanaged([]const u8) = .empty,
+
 pub const empty: BuildGraph = .{};
 
 pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
@@ -43,6 +53,8 @@ pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
         entry.value_ptr.deinit(gpa);
     }
     self.modules.deinit(gpa);
+    for (self.test_roots.items) |path| gpa.free(path);
+    self.test_roots.deinit(gpa);
     self.* = undefined;
 }
 
@@ -146,6 +158,16 @@ pub fn parseInto(
 
         const call = tree.fullCall(&call_buf, node) orelse continue;
         const field = fieldAccessName(&tree, call.ast.fn_expr) orelse continue;
+
+        if (std.mem.eql(u8, field, "addTest")) {
+            if (call.ast.params.len >= 1) {
+                if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
+                    errdefer gpa.free(path);
+                    try result.test_roots.append(gpa, path);
+                }
+            }
+            continue;
+        }
 
         if (std.mem.eql(u8, field, "addModule")) {
             if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
@@ -266,6 +288,44 @@ fn rootSourceFileFromOptions(tree: *const Ast, options: Ast.Node.Index, struct_b
             return tree.nodeMainToken(arg);
         }
         return pathThroughHelperCall(tree, path_call);
+    }
+    return null;
+}
+
+/// If `options` (a `b.addTest(.{ ... })` call's first argument) is either
+/// the older `.{ .root_source_file = b.path("...") }` shape (delegated to
+/// `rootSourceFileFromOptions`) or the current `.{ .root_module = <module>
+/// }` shape — `<module>` a local variable bound to a `createModule` call
+/// found earlier in the same scan, or an inline `b.createModule(...)` call
+/// — returns that module's root source file path, freshly allocated.
+/// `null` if neither shape matches, or the path couldn't be resolved.
+fn testRootFromOptions(
+    gpa: Allocator,
+    tree: *const Ast,
+    bindings: *const std.StringHashMapUnmanaged([]const u8),
+    options: Ast.Node.Index,
+    struct_buf: *[2]Ast.Node.Index,
+    call_buf: *[1]Ast.Node.Index,
+) !?[]u8 {
+    if (rootSourceFileFromOptions(tree, options, struct_buf)) |tok| {
+        return parseStringLiteral(gpa, tree, tok) catch null;
+    }
+
+    const struct_init = tree.fullStructInit(struct_buf, options) orelse return null;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_module")) continue;
+
+        if (tree.nodeTag(field_value) == .identifier) {
+            const name = tree.tokenSlice(tree.nodeMainToken(field_value));
+            const path = bindings.get(name) orelse return null;
+            return try gpa.dupe(u8, path);
+        }
+
+        if (rootSourceFileOfCreateModule(tree, field_value, call_buf, struct_buf)) |tok| {
+            return parseStringLiteral(gpa, tree, tok) catch null;
+        }
+        return null;
     }
     return null;
 }
