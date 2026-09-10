@@ -101,6 +101,15 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// already include instance methods (it doesn't yet separate them from
 /// static ones). Skipped when `InstanceType.resolve` can't determine a
 /// type, e.g. a variable initialized from a function's return value.
+///
+/// Phase 21: every container symbol also gets a `.definite` edge to each of
+/// its own fields (ZLint's `Symbol.members`), regardless of whether
+/// anything ever references a field by name. A struct field's type is part
+/// of its container's type — Zig resolves every field when the container
+/// type is used, whether or not the field is ever named directly — so a
+/// comptime-reflection-driven registry (`inline for (std.meta.fields(Rules))
+/// |f| ...`) doesn't strand its fields' own referenced symbols as dead just
+/// because no ordinary reference names the field.
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
@@ -136,6 +145,11 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
                     try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);
                 };
             }
+        }
+
+        for (semantic.symbols.getMembers(sym_id).items) |member| {
+            const member_id: SymbolId = .{ .file = file, .local = member };
+            try graph.addEdge(gpa, .{ .file = file, .local = sym_id }, member_id, semantic.symbols.get(member).decl, .definite);
         }
     }
 

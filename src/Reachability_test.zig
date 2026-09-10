@@ -289,3 +289,63 @@ test "@field(Foo, \"bar\") with a comptime-known name is definitely reachable" {
     const bar = semantic.symbols.getSymbolNamed("bar").?;
     try t.expect(reachability.isReachable(.{ .file = file_id, .local = bar }));
 }
+
+test "a struct field only reached by comptime reflection stays reachable through its container" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "rules.zig",
+        \\pub const DuplicateCase = struct {
+        \\    pub fn run() void {}
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "main.zig",
+        \\const rules = @import("rules.zig");
+        \\
+        \\fn RuleConfig(comptime T: type) type {
+        \\    return struct {
+        \\        pub fn run(self: @This()) void {
+        \\            _ = self;
+        \\            T.run();
+        \\        }
+        \\    };
+        \\}
+        \\
+        \\const Rules = struct {
+        \\    duplicate_case: RuleConfig(rules.DuplicateCase) = .{},
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    const cfg: Rules = .{};
+        \\    _ = cfg;
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const main_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(main_id).semantic;
+    const duplicate_case = semantic.symbols.getSymbolNamed("duplicate_case").?;
+    try t.expect(reachability.isReachable(.{ .file = main_id, .local = duplicate_case }));
+
+    for (project.files.items) |f| {
+        if (!std.mem.endsWith(u8, f.path, "rules.zig")) continue;
+        const duplicate_case_ty = f.semantic.symbols.getSymbolNamed("DuplicateCase").?;
+        try t.expect(reachability.isReachable(.{ .file = f.id, .local = duplicate_case_ty }));
+    }
+}

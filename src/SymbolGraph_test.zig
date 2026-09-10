@@ -276,6 +276,77 @@ test "@field(Outer.Inner, \"run\") resolves through a FieldChain-resolved contai
     try t.expect(found);
 }
 
+test "a container edges to each of its own fields" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    bar: u32 = 0,
+        \\    baz: u32 = 0,
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const foo_id = sem.symbols.getSymbolNamed("Foo").?;
+    const bar_id = sem.symbols.getSymbolNamed("bar").?;
+    const baz_id = sem.symbols.getSymbolNamed("baz").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = foo_id });
+    var found_bar = false;
+    var found_baz = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = bar_id })) found_bar = true;
+        if (edge.to.eql(.{ .file = file, .local = baz_id })) found_baz = true;
+    }
+    try t.expect(found_bar);
+    try t.expect(found_baz);
+}
+
+test "a field's type expression edges from the field, reachable through its container" {
+    var sem = try build(
+        \\fn Registry(comptime T: type) type {
+        \\    return struct { value: T = undefined };
+        \\}
+        \\const Rule = struct {};
+        \\const Rules = struct {
+        \\    entry: Registry(Rule) = .{},
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const rules_id = sem.symbols.getSymbolNamed("Rules").?;
+    const entry_id = sem.symbols.getSymbolNamed("entry").?;
+    const rule_id = sem.symbols.getSymbolNamed("Rule").?;
+
+    const from_rules = graph.outgoing(.{ .file = file, .local = rules_id });
+    var reaches_entry = false;
+    for (from_rules) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = entry_id })) reaches_entry = true;
+    }
+    try t.expect(reaches_entry);
+
+    const from_entry = graph.outgoing(.{ .file = file, .local = entry_id });
+    var reaches_rule = false;
+    for (from_entry) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = rule_id })) reaches_rule = true;
+    }
+    try t.expect(reaches_rule);
+}
+
 test "an unreferenced declaration has no outgoing edges" {
     var sem = try build(
         \\fn a() void {}
