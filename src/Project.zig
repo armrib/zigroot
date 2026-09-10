@@ -169,37 +169,21 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
     for (imports) |entry| {
         switch (entry.kind) {
             .module => {
-                const build_graph = self.build_graph orelse {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
-                    continue;
-                };
-                const rel_paths = build_graph.resolve(entry.specifier) orelse {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
-                    continue;
-                };
-
-                // More than one candidate means the scan couldn't tell
-                // which branch of a conditional the build script actually
-                // takes (see BuildGraph.zig); treat every candidate as
-                // reachable rather than guessing.
-                var resolved_any = false;
-                for (rel_paths) |rel_path| {
-                    const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
-                    defer self.gpa.free(target_path);
-
-                    const target_id = self.loadRecursive(target_path) catch continue;
-                    try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
-                    resolved_any = true;
-                }
-                if (!resolved_any) {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
-                }
+                if (try self.resolveViaBuildGraph(id, entry)) continue;
+                try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.specifier, ".zig")) {
                     try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
                     continue;
                 }
+
+                // A build-registered module name always wins over a
+                // same-named sibling file — matches real @import
+                // semantics, where the compilation's module table is
+                // consulted before any filesystem-relative lookup.
+                if (try self.resolveViaBuildGraph(id, entry)) continue;
+
                 const target_path = std.fs.path.resolve(self.gpa, &.{ dir, entry.specifier }) catch {
                     try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
                     continue;
@@ -216,6 +200,35 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
     }
 
     return id;
+}
+
+/// If `entry.specifier` names a `build_graph`-registered module, loads
+/// every candidate root file it resolves to, records an edge for each,
+/// and returns `true`. Returns `false` (without touching `import_graph`)
+/// if there's no `build_graph` or it doesn't know `entry.specifier`,
+/// leaving the caller to fall back to its own resolution or mark the
+/// import unresolved.
+fn resolveViaBuildGraph(self: *Project, id: FileId, entry: anytype) !bool {
+    const build_graph = self.build_graph orelse return false;
+    const rel_paths = build_graph.resolve(entry.specifier) orelse return false;
+
+    // More than one candidate means the scan couldn't tell which branch
+    // of a conditional the build script actually takes (see
+    // BuildGraph.zig); treat every candidate as reachable rather than
+    // guessing.
+    var resolved_any = false;
+    for (rel_paths) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+
+        const target_id = self.loadRecursive(target_path) catch continue;
+        try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
+        resolved_any = true;
+    }
+    if (!resolved_any) {
+        try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+    }
+    return true;
 }
 
 fn canonicalize(self: *Project, path: []const u8) ![]u8 {

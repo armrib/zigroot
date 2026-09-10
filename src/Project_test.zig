@@ -215,3 +215,48 @@ test "loadBuildGraph follows a split-out helper file's b.path() calls relative t
     try t.expectEqual(@as(usize, 2), project.files.items.len);
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
+
+test "a .zig-suffixed named-module import consults build_graph instead of only guessing a sibling path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const handlers_mod = b.createModule(.{
+        \\        .root_source_file = b.path("domains/fuse/handlers.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("apps/fuse-shim/src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("handlers.zig", handlers_mod);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "apps/fuse-shim/src/main.zig",
+        \\const handlers = @import("handlers.zig");
+        \\pub fn main() void {
+        \\    handlers.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "domains/fuse/handlers.zig",
+        \\pub fn run() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "apps/fuse-shim/src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
+}
