@@ -405,3 +405,42 @@ test "a struct field only reached by comptime reflection stays reachable through
         try t.expect(reachability.isReachable(.{ .file = f.id, .local = duplicate_case_ty }));
     }
 }
+
+test "fields of an anonymous struct returned from a reachable function stay reachable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn get_or_create() !struct { channel_id: u32, created: bool } {
+        \\    return .{ .channel_id = 1, .created = true };
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    _ = get_or_create() catch return;
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const main_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(main_id).semantic;
+    const channel_id = semantic.symbols.getSymbolNamed("channel_id").?;
+    const created = semantic.symbols.getSymbolNamed("created").?;
+
+    try t.expect(reachability.isReachable(.{ .file = main_id, .local = channel_id }));
+    try t.expect(reachability.isReachable(.{ .file = main_id, .local = created }));
+}

@@ -347,6 +347,85 @@ test "a field's type expression edges from the field, reachable through its cont
     try t.expect(reaches_rule);
 }
 
+test "a function edges to the fields of an anonymous struct in its return type" {
+    var sem = try build(
+        \\fn anon_ret() struct { anon_field: bool } {
+        \\    return .{ .anon_field = true };
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const anon_ret_id = sem.symbols.getSymbolNamed("anon_ret").?;
+    const anon_field_id = sem.symbols.getSymbolNamed("anon_field").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = anon_ret_id });
+    var found = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = anon_field_id })) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a function edges to the fields of an anonymous struct behind its error-union return type" {
+    var sem = try build(
+        \\fn anon_ret() !struct { anon_field: bool } {
+        \\    return .{ .anon_field = true };
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const anon_ret_id = sem.symbols.getSymbolNamed("anon_ret").?;
+    const anon_field_id = sem.symbols.getSymbolNamed("anon_field").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = anon_ret_id });
+    var found = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = anon_field_id })) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a function edges to the fields of an anonymous struct in a parameter's type" {
+    var sem = try build(
+        \\fn f(p: struct { anon_field: bool }) void { _ = p; }
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const f_id = sem.symbols.getSymbolNamed("f").?;
+    const anon_field_id = sem.symbols.getSymbolNamed("anon_field").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = f_id });
+    var found = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = anon_field_id })) found = true;
+    }
+    try t.expect(found);
+}
+
 test "an unreferenced declaration has no outgoing edges" {
     var sem = try build(
         \\fn a() void {}

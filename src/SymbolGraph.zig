@@ -110,9 +110,32 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// comptime-reflection-driven registry (`inline for (std.meta.fields(Rules))
 /// |f| ...`) doesn't strand its fields' own referenced symbols as dead just
 /// because no ordinary reference names the field.
+///
+/// Phase 25: an anonymous `struct { ... }`/`union { ... }` spelled inline in
+/// a function's return-type or parameter position has no container symbol
+/// of its own for Phase 21's edge to hang off — ZLint only pushes a symbol
+/// onto its container-symbol stack for a *named* container bound by a
+/// `var`/`const` (`Builder.visitVarDecl`'s `enterContainerSymbol`), which a
+/// `fn`'s return type and parameters never get, so the anonymous type's
+/// fields end up members of whatever *enclosing* container happens to be on
+/// the stack (the file root, or an outer named type) instead of the
+/// function. This edges the function symbol straight to each such field,
+/// found by matching `decl_index` (every symbol's own declaration node, so
+/// the field's member symbol — wherever ZLint attached it — can be found
+/// from the anonymous container's member nodes) against the container
+/// node `anonymousContainer` unwraps from the return-type/parameter
+/// expression (a leading pointer/slice/array, an `?`, or a `!` error union).
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
+
+    var decl_index: std.AutoHashMapUnmanaged(Semantic.Ast.Node.Index, Semantic.Symbol.Id) = .empty;
+    defer decl_index.deinit(gpa);
+    try decl_index.ensureTotalCapacity(gpa, @intCast(semantic.symbols.symbols.len));
+    {
+        var it = semantic.symbols.iter();
+        while (it.next()) |id| decl_index.putAssumeCapacity(semantic.symbols.get(id).decl, id);
+    }
 
     var sym_it = semantic.symbols.iter();
     while (sym_it.next()) |sym_id| {
@@ -151,7 +174,84 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             const member_id: SymbolId = .{ .file = file, .local = member };
             try graph.addEdge(gpa, .{ .file = file, .local = sym_id }, member_id, semantic.symbols.get(member).decl, .definite);
         }
+
+        const symbol = semantic.symbols.get(sym_id);
+        if (symbol.flags.s_fn) {
+            const ast = &semantic.parse.ast;
+            var proto_buf: [1]Semantic.Ast.Node.Index = undefined;
+            if (ast.fullFnProto(&proto_buf, symbol.decl)) |proto| {
+                if (proto.ast.return_type.unwrap()) |return_type| {
+                    try edgeAnonymousContainerFields(gpa, &graph, file, semantic, &decl_index, sym_id, return_type);
+                }
+                var param_it = proto.iterate(ast);
+                while (param_it.next()) |param| {
+                    if (param.type_expr) |type_expr| {
+                        try edgeAnonymousContainerFields(gpa, &graph, file, semantic, &decl_index, sym_id, type_expr);
+                    }
+                }
+            }
+        }
     }
 
     return graph;
+}
+
+/// Unwraps a leading pointer/slice/array wrapper, `?`, or `!` error union
+/// off `node` (the same wrappers `InstanceType.resolveTypeExpr` and
+/// `Resolver.callInstanceType` already unwrap for other purposes) until it
+/// finds a `struct`/`union`/`enum` container-decl node, or runs out of
+/// wrappers to unwrap. `null` if `node` never bottoms out at one.
+fn anonymousContainer(ast: *const Semantic.Ast, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    var cur = node;
+    while (true) {
+        if (ast.fullPtrType(cur)) |ptr| {
+            cur = ptr.ast.child_type;
+        } else if (ast.fullArrayType(cur)) |array| {
+            cur = array.ast.elem_type;
+        } else switch (ast.nodeTag(cur)) {
+            .optional_type => cur = ast.nodeData(cur).node,
+            .error_union => cur = ast.nodeData(cur).node_and_node[1],
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            => return cur,
+            else => return null,
+        }
+    }
+}
+
+/// If `type_node` (a function's return-type or parameter-type expression)
+/// names an anonymous container inline, a `.definite` edge from `from` to
+/// each of that container's field/declaration symbols — found via
+/// `decl_index`, since ZLint attached them as members of whichever *named*
+/// container symbol happened to be on its container-symbol stack (see this
+/// function's Phase 25 doc comment on `SymbolGraph.build`), not of the
+/// anonymous container itself.
+fn edgeAnonymousContainerFields(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    file: FileId,
+    semantic: *const Semantic,
+    decl_index: *const std.AutoHashMapUnmanaged(Semantic.Ast.Node.Index, Semantic.Symbol.Id),
+    from: Semantic.Symbol.Id,
+    type_node: Semantic.Ast.Node.Index,
+) Allocator.Error!void {
+    const ast = &semantic.parse.ast;
+    const container_node = anonymousContainer(ast, type_node) orelse return;
+
+    var buf: [2]Semantic.Ast.Node.Index = undefined;
+    const container = ast.fullContainerDecl(&buf, container_node) orelse return;
+    for (container.ast.members) |member_node| {
+        const member_id = decl_index.get(member_node) orelse continue;
+        try graph.addEdge(gpa, .{ .file = file, .local = from }, .{ .file = file, .local = member_id }, member_node, .definite);
+    }
 }
