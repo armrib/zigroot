@@ -273,6 +273,49 @@ test "locals and parameters of a dead function roll up into one finding" {
     try t.expectEqual(@as(?usize, 3), found_parent);
 }
 
+test "an anytype parameter of a dead function rolls up into its parent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn call_cb(cb: anytype) void {
+        \\    cb(1);
+        \\}
+        \\pub fn main() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const call_cb = semantic.symbols.getSymbolNamed("call_cb").?;
+    const cb = semantic.symbols.getSymbolNamed("cb").?;
+
+    var found_parent: ?usize = null;
+    for (dead.items) |d| {
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = cb }));
+        if (d.id.eql(.{ .file = file_id, .local = call_cb })) found_parent = d.nested;
+    }
+    try t.expectEqual(@as(?usize, 1), found_parent);
+}
+
 test "a symbol only referenced from a test block is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

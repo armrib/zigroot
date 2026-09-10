@@ -161,6 +161,18 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
 fn ownerOf(project: *const Project, id: SymbolId) ?SymbolId {
     const f = project.file(id.file);
     const sym = f.semantic.symbols.get(id.local);
+    // An `anytype` parameter has no type-expression node of its own, so
+    // ZLint declares it at the same node as its enclosing function — the
+    // function claims that node in `OwnerMap`'s `self_decl`, so the
+    // parameter's owner is whoever's registered there, not whatever
+    // `owner_map.get` resolves the shared node's *parent* to.
+    if (sym.flags.s_fn_param) {
+        if (f.owner_map.declaredAt(sym.decl)) |owner_local| {
+            if (!(SymbolId{ .file = id.file, .local = owner_local }).eql(id)) {
+                return .{ .file = id.file, .local = owner_local };
+            }
+        }
+    }
     const owner_local = f.owner_map.get(sym.decl) orelse return null;
     return .{ .file = id.file, .local = owner_local };
 }

@@ -27,6 +27,13 @@ const OwnerMap = @This();
 /// any node ZLint's builder never visited).
 owner: []Symbol.Id.Optional,
 
+/// decl node -> the symbol registered as declared *at* that exact node
+/// (see `build`'s `decl_of`). Kept around so callers can tell whether a
+/// node is itself somebody's declaration site — needed for an `anytype`
+/// parameter, whose `decl` node is the same node its enclosing function
+/// was declared at.
+self_decl: std.AutoHashMapUnmanaged(Ast.Node.Index, Symbol.Id),
+
 /// Builds the owner map for one file's `Semantic`. `semantic` must outlive
 /// neither the map nor be mutated afterwards; the map only borrows its node
 /// count and links, it doesn't hold a reference to it.
@@ -44,7 +51,7 @@ pub fn build(gpa: Allocator, semantic: *const Semantic) Allocator.Error!OwnerMap
     // owner never gets an edge to it). Skip them so the walk below keeps
     // climbing past the payload to the actual enclosing declaration.
     var decl_of: std.AutoHashMapUnmanaged(Ast.Node.Index, Symbol.Id) = .empty;
-    defer decl_of.deinit(gpa);
+    errdefer decl_of.deinit(gpa);
     try decl_of.ensureTotalCapacity(gpa, @intCast(semantic.symbols.symbols.len));
 
     var sym_it = semantic.symbols.iter();
@@ -81,15 +88,23 @@ pub fn build(gpa: Allocator, semantic: *const Semantic) Allocator.Error!OwnerMap
         }
     }
 
-    return .{ .owner = owner };
+    return .{ .owner = owner, .self_decl = decl_of };
 }
 
 pub fn deinit(self: *OwnerMap, gpa: Allocator) void {
     gpa.free(self.owner);
+    self.self_decl.deinit(gpa);
     self.* = undefined;
 }
 
 /// The symbol whose declaration contains `node`, if any.
 pub fn get(self: *const OwnerMap, node: Ast.Node.Index) ?Symbol.Id {
     return self.owner[@intFromEnum(node)].unwrap();
+}
+
+/// The symbol registered as declared *at* `node` itself, if any — e.g. for
+/// an `anytype` parameter's decl node, this returns its enclosing
+/// function's symbol, since that's who claimed the shared node first.
+pub fn declaredAt(self: *const OwnerMap, node: Ast.Node.Index) ?Symbol.Id {
+    return self.self_decl.get(node);
 }
