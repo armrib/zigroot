@@ -234,6 +234,47 @@ test "a parameter with no statically-named type resolves to null" {
     try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, x_id));
 }
 
+test "a container field's own type annotation resolves to the annotated type's symbol" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn run(self: *Foo) void { _ = self; }
+        \\};
+        \\const Holder = struct {
+        \\    foo: Foo,
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const foo_id = sem.symbols.getSymbolNamed("Foo").?;
+    const field_id = sem.symbols.getSymbolNamed("foo").?;
+
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, &owner_map, field_id).?);
+}
+
+test "crossFileRoot finds the base and field of a cross-file-typed container field" {
+    var sem = try build(
+        \\const storage = 0;
+        \\const Holder = struct {
+        \\    foo: storage.Widget,
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const storage_id = sem.symbols.getSymbolNamed("storage").?;
+    const field_id = sem.symbols.getSymbolNamed("foo").?;
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, field_id).?;
+    try t.expectEqual(storage_id, root.base);
+    try t.expectEqualStrings("Widget", root.field);
+}
+
 test "a non-variable symbol resolves to null" {
     var sem = try build(
         \\const Foo = struct {};

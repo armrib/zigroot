@@ -16,6 +16,13 @@
 //! way as the variable cases above (one leading pointer is unwrapped, since
 //! `self: *Foo` is far more common than a by-value receiver).
 //!
+//! Phase 22: a container field's own type annotation (`foo: Foo` inside a
+//! struct/union) is the same shape too, read off a `fullContainerField`
+//! instead. `FieldChain.resolveChain` uses this to keep a chain going past a
+//! field hop — `h.foo.helper()`, where `foo: Foo` — since `foo`'s own export
+//! set is empty (it's a field, not a container); its *declared type* is what
+//! has `helper` as an export.
+//!
 //! ZLint doesn't yet distinguish `self`-taking instance methods from static
 //! functions declared in a container (see `Symbol.zig`'s "TODO: bind
 //! methods as members") — both land in `Symbol.exports`. So once a
@@ -72,15 +79,21 @@ const TypeNodeCandidates = struct {
 
 /// The declared-type node candidates to try in order for `sym_id`: a
 /// function parameter's own type node (`self: *Foo`, one leading pointer
-/// unwrapped), then an explicit variable type annotation, then an
-/// explicitly-typed struct-literal initializer. Empty if `sym_id` is
-/// neither a function parameter nor a variable, or has none of these.
+/// unwrapped), a container field's own type annotation (`foo: Foo` inside a
+/// struct/union), then an explicit variable type annotation, then an
+/// explicitly-typed struct-literal initializer. Empty if `sym_id` is none of
+/// these, or has none of these.
 fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) TypeNodeCandidates {
     var out: TypeNodeCandidates = .{};
     const symbol = semantic.symbols.get(sym_id);
 
     if (symbol.flags.s_fn_param) {
         if (paramTypeNode(semantic, symbol)) |type_node| out.push(type_node);
+        return out;
+    }
+
+    if (symbol.flags.s_member and !symbol.flags.s_error) {
+        if (fieldTypeNode(semantic, symbol)) |type_node| out.push(type_node);
         return out;
     }
 
@@ -108,6 +121,15 @@ fn paramTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast
     const node = symbol.decl;
     if (ast.fullPtrType(node)) |ptr| return ptr.ast.child_type;
     return node;
+}
+
+/// A container field symbol's own type annotation node (`foo: Foo` ->
+/// `Foo`'s node). `null` for a tuple-like field (`struct { a, b }`), which
+/// has no type expression of its own to read.
+fn fieldTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast.Node.Index {
+    const ast = &semantic.parse.ast;
+    const field = ast.fullContainerField(symbol.decl) orelse return null;
+    return field.ast.type_expr.unwrap();
 }
 
 /// Resolves a type-position expression node to the symbol it names: a bare

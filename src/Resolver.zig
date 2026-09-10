@@ -103,7 +103,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
                 const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, import_root, field_name) orelse continue;
                 const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-                try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
+                try addChain(project, &graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
                 continue;
             }
 
@@ -111,7 +111,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
                 switch (resolution) {
                     .possible => |target| {
                         const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-                        try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
+                        try addChain(project, &graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
                     },
                     .unknown => |exports| for (exports) |target| {
                         try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .unknown);
@@ -132,8 +132,48 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 
     try buildInstanceTypes(gpa, &graph, project);
     try buildCallInstanceTypes(gpa, &graph, project);
+    try buildStuckFieldChains(gpa, &graph, project);
 
     return graph;
+}
+
+/// Phase 22: `SymbolGraph.build` walks every same-file reference through
+/// `FieldChain.resolveChain` itself (both the reference's own chain and, for
+/// an instance-typed variable, the chain from its type), but has no
+/// `Project` to finish a chain that gets stuck on a field/variable whose own
+/// declared type crosses an `@import` boundary (`h.foo.bar()`, where `foo`'s
+/// type is `mod.Foo`) — see `FieldChain.ChainWalk.stuck`. Mirrors that same
+/// reference-walking structure, but only to find the chains that got stuck,
+/// and finishes them via `addChain`'s cross-file continuation. Chains that
+/// resolved without needing this are already edged by `SymbolGraph.build`;
+/// redoing them here too is harmless (graphs tolerate duplicate edges).
+fn buildStuckFieldChains(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        const semantic = &file.semantic;
+
+        var sym_it = semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            const instance_ty = InstanceType.resolve(semantic, &file.owner_map, sym_id);
+
+            var ref_it = semantic.symbols.iterReferences(sym_id);
+            while (ref_it.next()) |ref| {
+                const owner = file.owner_map.get(ref.node) orelse continue;
+                const owner_id: SymbolId = .{ .file = file.id, .local = owner };
+
+                const chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
+                if (chain.stuck != null) {
+                    try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
+                }
+
+                if (instance_ty) |ty| {
+                    const inst_chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, ty, ref.node, .possible);
+                    if (inst_chain.stuck != null) {
+                        try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, ty, ref.node, .possible);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Phase 20: if `import_node` (the `@import(...)` call itself) is
@@ -185,7 +225,7 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
             while (ref_it.next()) |ref| {
                 const owner = file.owner_map.get(ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
-                try addChain(graph, gpa, owner_id, target_file_id, semantic, target_semantic, &target_file.owner_map, ty, ref.node, .possible);
+                try addChain(project, graph, gpa, owner_id, target_file_id, semantic, target_semantic, &target_file.owner_map, ty, ref.node, .possible);
             }
         }
     }
@@ -257,7 +297,7 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
             while (ref_it.next()) |ref| {
                 const owner = file.owner_map.get(ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
-                try addChain(graph, gpa, owner_id, ty.file, semantic, ty_semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
+                try addChain(project, graph, gpa, owner_id, ty.file, semantic, ty_semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
             }
         }
     }
@@ -348,10 +388,19 @@ fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
 /// `start_node` in `ast`) via `FieldChain.resolveChain` at `start_kind`
-/// confidence, adding an edge to wherever the chain ends up in
-/// `target_file`, plus `.unknown` edges to every export if it stopped at a
-/// runtime-named `@field(...)` hop.
+/// confidence, adding an edge to wherever the chain ends up, plus `.unknown`
+/// edges to every export if it stopped at a runtime-named `@field(...)` hop.
+///
+/// Phase 22: if the walk gets stuck on a field/variable whose own declared
+/// type crosses another `@import` boundary (`h.foo.bar()`, where `foo`'s
+/// type is `mod.Foo`) — the same shape `buildInstanceTypes` resolves for a
+/// chain's *starting* symbol, just reached mid-chain instead — resolves that
+/// hop the same way (`InstanceType.crossFileRoot` + `importTargetRoot` +
+/// `FieldChain.findExport`) and resumes the walk in the target file. Loops
+/// since the newly-resolved type can itself have a field with yet another
+/// cross-file type.
 fn addChain(
+    project: *const Project,
     graph: *SymbolGraph,
     gpa: Allocator,
     owner_id: SymbolId,
@@ -363,13 +412,30 @@ fn addChain(
     start_node: Semantic.Ast.Node.Index,
     start_kind: FieldChain.Kind,
 ) !void {
-    const chain = FieldChain.resolveChain(ast, symbols, owner_map, start, start_node, start_kind);
+    var cur_file = target_file;
+    var cur_symbols = symbols;
+    var cur_owner_map = owner_map;
+    var chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, start, start_node, start_kind);
+
+    while (chain.stuck) |stuck| {
+        const root = InstanceType.crossFileRoot(cur_symbols, cur_owner_map, stuck.symbol) orelse break;
+        const target = importTargetRoot(project, cur_file, root.base) orelse break;
+        const next_file = project.file(target.file);
+        const next_semantic = &next_file.semantic;
+        const ty = FieldChain.findExport(next_semantic, &next_file.owner_map, target.root, root.field) orelse break;
+
+        cur_file = target.file;
+        cur_symbols = next_semantic;
+        cur_owner_map = &next_file.owner_map;
+        chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty, stuck.node, stuck.kind);
+    }
+
     const kind: SymbolGraph.EdgeKind = switch (chain.result.kind) {
         .definite => .definite,
         .possible => .possible,
     };
-    try graph.addEdge(gpa, owner_id, .{ .file = target_file, .local = chain.result.symbol }, chain.result.node, kind);
+    try graph.addEdge(gpa, owner_id, .{ .file = cur_file, .local = chain.result.symbol }, chain.result.node, kind);
     if (chain.unknown) |unknown| for (unknown.exports) |target| {
-        try graph.addEdge(gpa, owner_id, .{ .file = target_file, .local = target }, unknown.node, .unknown);
+        try graph.addEdge(gpa, owner_id, .{ .file = cur_file, .local = target }, unknown.node, .unknown);
     };
 }

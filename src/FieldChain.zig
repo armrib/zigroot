@@ -30,6 +30,7 @@ const std = @import("std");
 const zlint = @import("zlint");
 const Semantic = zlint.Semantic;
 const DynamicField = @import("DynamicField.zig");
+const InstanceType = @import("InstanceType.zig");
 const OwnerMap = @import("OwnerMap.zig");
 
 /// How confidently a `resolveChain` hop was resolved: `.definite` for a
@@ -51,10 +52,25 @@ pub const Unknown = struct {
     node: Semantic.Ast.Node.Index,
 };
 
+pub const StuckHop = struct {
+    /// The symbol (declared in `symbols`) the walk stopped on — a field or
+    /// variable whose own declared type is what the next hop needs, but
+    /// that type expression crosses an `@import` boundary `InstanceType`
+    /// can't follow on its own.
+    symbol: Semantic.Symbol.Id,
+    node: Semantic.Ast.Node.Index,
+    kind: Kind,
+};
+
 pub const ChainWalk = struct {
     result: ChainResult,
     /// Set only if the walk stopped at a runtime-named `@field(...)` hop.
     unknown: ?Unknown = null,
+    /// Set only if the walk stopped because the next hop's container needs
+    /// a cross-file declared-type resolution — see `Resolver`, which has
+    /// the `Project` needed to finish it and resume the walk in the target
+    /// file.
+    stuck: ?StuckHop = null,
 };
 
 /// Walks `start` (declared in `symbols`, first referenced at `start_node` in
@@ -66,13 +82,33 @@ pub const ChainWalk = struct {
 pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *const OwnerMap, start: Semantic.Symbol.Id, start_node: Semantic.Ast.Node.Index, start_kind: Kind) ChainWalk {
     var current: ChainResult = .{ .symbol = start, .node = start_node, .kind = start_kind };
     while (true) {
+        // `current.symbol` may itself be a container field or variable
+        // rather than a container/type — e.g. after hopping onto `foo` in
+        // `h.foo.helper()`, where `foo: Foo` is a field. A field's own
+        // export set is empty; it's the type it's declared with that has
+        // `helper` as an export. Falls back to `current.symbol` unchanged
+        // when it's already a container (the common case), or when it has
+        // no syntactically-resolvable declared type. Redirecting through a
+        // declared type is the same kind of guess `InstanceType`'s other
+        // callers already downgrade to `.possible` for, so every hop after
+        // one is used follows suit — `current.kind` only stays `.definite`
+        // for a chain of plain static `container.member` hops.
+        const type_resolved = InstanceType.resolve(symbols, owner_map, current.symbol);
+        const container = type_resolved orelse current.symbol;
+        const hop_kind: Kind = if (type_resolved != null) .possible else current.kind;
+
         if (fieldAccessName(ast, current.node)) |name| {
-            const next = findExport(symbols, owner_map, current.symbol, name) orelse break;
-            current = .{ .symbol = next, .node = ast.node_links.getParent(current.node).?, .kind = current.kind };
-            continue;
+            if (findExport(symbols, owner_map, container, name)) |next| {
+                current = .{ .symbol = next, .node = ast.node_links.getParent(current.node).?, .kind = hop_kind };
+                continue;
+            }
+            if (container == current.symbol and InstanceType.crossFileRoot(symbols, owner_map, current.symbol) != null) {
+                return .{ .result = current, .stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible } };
+            }
+            break;
         }
 
-        if (DynamicField.resolve(ast, symbols, current.symbol, current.node)) |resolution| switch (resolution) {
+        if (DynamicField.resolve(ast, symbols, container, current.node)) |resolution| switch (resolution) {
             .possible => |target| {
                 current = .{ .symbol = target, .node = ast.node_links.getParent(current.node).?, .kind = .possible };
                 continue;
@@ -103,17 +139,22 @@ pub fn fieldAccessName(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?[]c
 /// always 0. Mirrors `Resolver`'s and `Roots`' constant of the same name.
 const FILE_ROOT_SYMBOL: Semantic.Symbol.Id = @enumFromInt(0);
 
-/// A symbol directly exported by `container` (ZLint's `Symbol.exports`)
-/// named `name`, if any. `container` is resolved through a `const X =
-/// @This();` alias first (see `thisAliasRoot`) — the common
-/// `Self`/`<TypeName>` idiom for a container naming itself, which otherwise
-/// dead-ends every container lookup that lands on it, since the alias is a
-/// plain `const`, not a container, and so has no exports of its own.
-/// `owner_map` is `symbols`' own `OwnerMap`, needed to find the true
-/// enclosing container of a *nested* such alias.
+/// A symbol directly exported by `container` (ZLint's `Symbol.exports`) or
+/// declared as one of its fields (`Symbol.members` — struct/union/enum
+/// fields are tracked separately from `const`/`fn` exports), named `name`,
+/// if any. `container` is resolved through a `const X = @This();` alias
+/// first (see `thisAliasRoot`) — the common `Self`/`<TypeName>` idiom for a
+/// container naming itself, which otherwise dead-ends every container
+/// lookup that lands on it, since the alias is a plain `const`, not a
+/// container, and so has no exports of its own. `owner_map` is `symbols`'
+/// own `OwnerMap`, needed to find the true enclosing container of a
+/// *nested* such alias.
 pub fn findExport(symbols: *const Semantic, owner_map: *const OwnerMap, container: Semantic.Symbol.Id, name: []const u8) ?Semantic.Symbol.Id {
     const resolved = thisAliasRoot(symbols, owner_map, container) orelse container;
     for (symbols.symbols.getExports(resolved).items) |id| {
+        if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
+    }
+    for (symbols.symbols.getMembers(resolved).items) |id| {
         if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
     }
     return null;
