@@ -687,6 +687,72 @@ test "an instance method reached through an array-index into a cross-file-typed 
     try t.expect(!reachability.isReachable(.{ .file = conn_id, .local = unused_sym }));
 }
 
+test "a field access isn't shadowed by a same-named local in another method of the container" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Issue 13: `init`'s local named `conns` (same name as the `conns`
+    // field) used to win `findExport`'s `exports` lookup before `members`
+    // was ever checked, stranding `.reset()` reached only through the real
+    // field.
+    try writeFile(tmp.dir, "main.zig",
+        \\const conn_mod = @import("conn.zig");
+        \\const std = @import("std");
+        \\pub const State = struct {
+        \\    conns: []conn_mod.Conn,
+        \\
+        \\    pub fn init(allocator: std.mem.Allocator) !State {
+        \\        const conns = try allocator.alloc(conn_mod.Conn, 4);
+        \\        for (conns) |*c| c.* = .{};
+        \\        return .{ .conns = conns };
+        \\    }
+        \\
+        \\    pub fn free_conn(self: *State, idx: u16) void {
+        \\        self.conns[idx].reset();
+        \\    }
+        \\};
+        \\pub fn main() void {
+        \\    var state = State.init(std.heap.page_allocator) catch unreachable;
+        \\    state.free_conn(0);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "conn.zig",
+        \\pub const Conn = struct {
+        \\    pub fn reset(self: *Conn) void { _ = self; }
+        \\    pub fn unused(self: *Conn) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const conn_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "conn.zig")) break f.id;
+    } else unreachable;
+    const conn_semantic = &project.file(conn_id).semantic;
+    const reset_sym = conn_semantic.symbols.getSymbolNamed("reset").?;
+    const unused_sym = conn_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = conn_id, .local = reset_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = conn_id, .local = unused_sym }));
+}
+
 test "a call-init chained through a cross-file-typed struct field's instance method is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

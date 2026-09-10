@@ -184,15 +184,61 @@ const FILE_ROOT_SYMBOL: Semantic.Symbol.Id = @enumFromInt(0);
 /// container, and so has no exports of its own. `owner_map` is `symbols`'
 /// own `OwnerMap`, needed to find the true enclosing container of a
 /// *nested* such alias.
+///
+/// ZLint's `Symbol.exports` for a container isn't limited to the
+/// container's own top-level declarations — it also includes any
+/// `const`/`var` locals declared inside the container's method bodies. An
+/// `exports` candidate is only accepted if `isContainerMember` confirms its
+/// declaration site is textually a member of some container (struct, union,
+/// enum, or the file root — which every top-level declaration is a member
+/// of), rather than a statement inside a function body. A method-local's
+/// nearest enclosing structural node is that function's `block`, not a
+/// container, so it's rejected and the search falls through to `members`
+/// (or `null`) instead of shadowing a real field of the same name. This
+/// stays true even for a method nested inside a further-nested *anonymous*
+/// container with no symbol of its own — e.g. a `type`-returning function's
+/// `return struct { pub fn init() ... };` — since the check only cares
+/// whether the nearest structural ancestor is a container, not which named
+/// symbol (if any) owns it.
 pub fn findExport(symbols: *const Semantic, owner_map: *const OwnerMap, container: Semantic.Symbol.Id, name: []const u8) ?Semantic.Symbol.Id {
     const resolved = thisAliasRoot(symbols, owner_map, container) orelse container;
     for (symbols.symbols.getExports(resolved).items) |id| {
-        if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
+        if (std.mem.eql(u8, symbols.symbols.get(id).name, name) and isContainerMember(symbols, symbols.symbols.get(id).decl)) return id;
     }
     for (symbols.symbols.getMembers(resolved).items) |id| {
         if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
     }
     return null;
+}
+
+/// Whether `decl` is textually declared as a direct member of a container
+/// (struct/union/enum literal, tagged or not, or the file root) rather than
+/// as a statement inside a function body — found by climbing `decl`'s AST
+/// parent chain and checking which kind of enclosing node is hit first.
+fn isContainerMember(symbols: *const Semantic, decl: Semantic.Ast.Node.Index) bool {
+    const ast = &symbols.parse.ast;
+    var cur = symbols.node_links.getParent(decl);
+    while (cur) |c| {
+        switch (ast.nodeTag(c)) {
+            .root,
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            => return true,
+            .block, .block_semicolon, .block_two, .block_two_semicolon => return false,
+            else => cur = symbols.node_links.getParent(c),
+        }
+    }
+    return false;
 }
 
 /// If `container` is a `const X = @This();` alias, the symbol of the
