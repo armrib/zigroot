@@ -176,6 +176,20 @@ fn importTarget(project: *const Project, file_id: FileId, base: Semantic.Symbol.
 /// type (unwrapping one `!error_union` payload), resolve that expression
 /// too, then chain the variable's own references into it the same way
 /// `buildInstanceTypes` does once its type is known.
+///
+/// Phase 19: a generic type-returning function (`fn Walker(comptime V: type)
+/// type { return struct { ... }; }`) declares its return type as the bare
+/// `type` keyword, not an expression `resolveValueChain` can resolve —
+/// there's no name to chase, since the returned type is the anonymous
+/// `struct { ... }` literal itself. ZLint's builder attributes that struct's
+/// `pub` members as exports of whatever container the *function itself* is
+/// declared in (it never pushes the anonymous struct as its own container —
+/// see `FieldChain.containerOf`'s doc comment), rather than of the function
+/// symbol — so `LintWalker.init` in `const LintWalker = walk.Walker(V); ...
+/// LintWalker.init(...)` resolves by treating `LintWalker` as an alias for
+/// `Walker`'s own enclosing container (usually `walk.zig`'s file root), the
+/// same way `FieldChain.findExport` already resolves a `const Self =
+/// @This();` alias to its container.
 fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
     for (project.files.items) |file| {
         const semantic = &file.semantic;
@@ -199,7 +213,11 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
                 return_node = fn_ast.nodeData(return_node).node_and_node[1];
             }
 
-            const ty = resolveValueChain(project, fn_sym.file, return_node) orelse continue;
+            const ty: SymbolId = if (isTypeKeyword(fn_semantic, return_node)) blk: {
+                const fn_owner_map = &project.file(fn_sym.file).owner_map;
+                const container = FieldChain.containerOf(fn_semantic, fn_owner_map, fn_sym.local) orelse continue;
+                break :blk .{ .file = fn_sym.file, .local = container };
+            } else resolveValueChain(project, fn_sym.file, return_node) orelse continue;
             const ty_file = project.file(ty.file);
             const ty_semantic = &ty_file.semantic;
 
@@ -211,6 +229,15 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
             }
         }
     }
+}
+
+/// Whether `node` is the bare `type` keyword — the return-type spelling of a
+/// generic type-returning function (`fn Walker(comptime V: type) type { ...
+/// }`), as opposed to a value's own type. ZLint parses it as a plain
+/// identifier, so this just checks the token text.
+fn isTypeKeyword(semantic: *const Semantic, node: Ast.Node.Index) bool {
+    const ast = &semantic.parse.ast;
+    return ast.nodeTag(node) == .identifier and std.mem.eql(u8, semantic.tokenSlice(ast.nodeMainToken(node)), "type");
 }
 
 /// Resolves a value-position expression node (`node`, in `file_id`'s AST) —

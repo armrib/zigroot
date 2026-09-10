@@ -193,6 +193,63 @@ test "a symbol only reachable via a cross-file-typed variable's instance method 
     try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
 }
 
+test "a symbol only reachable via a generic type-returning function's init is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const walk = @import("walk.zig");
+        \\pub fn main() void {
+        \\    const LintWalker = walk.Walker(u8);
+        \\    var w = LintWalker.init();
+        \\    _ = &w;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "walk.zig",
+        \\pub fn Walker(comptime T: type) type {
+        \\    return struct {
+        \\        pub fn init() @This() {
+        \\            used();
+        \\            return .{};
+        \\        }
+        \\    };
+        \\}
+        \\fn used() void {}
+        \\fn unused() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const walk_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "walk.zig")) break f.id;
+    } else unreachable;
+    const walk_semantic = &project.file(walk_id).semantic;
+    const init_sym = walk_semantic.symbols.getSymbolNamed("init").?;
+    const used_sym = walk_semantic.symbols.getSymbolNamed("used").?;
+    const unused_sym = walk_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = walk_id, .local = init_sym }));
+    try t.expect(reachability.isReachable(.{ .file = walk_id, .local = used_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = walk_id, .local = unused_sym }));
+}
+
 test "@field(storage, \"start\") produces a cross-file .possible edge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

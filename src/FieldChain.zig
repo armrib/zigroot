@@ -121,17 +121,8 @@ pub fn findExport(symbols: *const Semantic, owner_map: *const OwnerMap, containe
 
 /// If `container` is a `const X = @This();` alias, the symbol of the
 /// container it's declared directly inside (`@This()` names the innermost
-/// enclosing container type). For a nested alias (`OwnerMap.get` on its
-/// declaration node lands on some other container symbol — a struct/enum/
-/// union/error set, whose own declaration node *is* its container node,
-/// which is exactly what a nested alias's parent chain hits first), that
-/// owner is the answer directly. For a file-top-level alias, `OwnerMap`
-/// finds no owner (the file root's declaration node is never registered as
-/// anyone's containing declaration), so it falls back to checking whether
-/// `container` is one of `FILE_ROOT_SYMBOL`'s own exports. `null` if
-/// `container` isn't such an alias, or its owner isn't actually a
-/// container (e.g. the alias is declared inside a function, not a
-/// container, directly).
+/// enclosing container type) — `containerOf(symbols, owner_map, container)`.
+/// `null` if `container` isn't such an alias.
 fn thisAliasRoot(symbols: *const Semantic, owner_map: *const OwnerMap, container: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const symbol = symbols.symbols.get(container);
     if (!symbol.flags.s_variable) return null;
@@ -145,13 +136,29 @@ fn thisAliasRoot(symbols: *const Semantic, owner_map: *const OwnerMap, container
     }
     if (!std.mem.eql(u8, symbols.tokenSlice(ast.nodeMainToken(init_node)), "@This")) return null;
 
+    return containerOf(symbols, owner_map, container);
+}
+
+/// The container symbol that directly exports `sym_id` — the symbol
+/// `OwnerMap` finds containing `sym_id`'s own declaration node, if that
+/// owner is itself a struct/enum/union/error set (a nested declaration:
+/// `OwnerMap.get` on it lands on some other container symbol, whose own
+/// declaration node *is* its container node, which is exactly what a
+/// nested declaration's parent chain hits first). For a file-top-level
+/// declaration, `OwnerMap` finds no owner (the file root's declaration
+/// node is never registered as anyone's containing declaration), so it
+/// falls back to checking whether `sym_id` is one of `FILE_ROOT_SYMBOL`'s
+/// own exports. `null` if `sym_id`'s owner isn't actually a container
+/// (e.g. it's declared inside a function, not a container, directly).
+pub fn containerOf(symbols: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const symbol = symbols.symbols.get(sym_id);
     if (owner_map.get(symbol.decl)) |owner| {
         const owner_symbol = symbols.symbols.get(owner);
         return if (owner_symbol.flags.intersects(Semantic.Symbol.Flags.s_container)) owner else null;
     }
 
     for (symbols.symbols.getExports(FILE_ROOT_SYMBOL).items) |id| {
-        if (id == container) return FILE_ROOT_SYMBOL;
+        if (id == sym_id) return FILE_ROOT_SYMBOL;
     }
     return null;
 }
