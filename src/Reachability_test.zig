@@ -497,6 +497,53 @@ test "a struct field only reached by comptime reflection stays reachable through
     }
 }
 
+test "named parameters of a bare fn-type field are never reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Handler = struct {
+        \\    on_data: *const fn (ctx: *anyopaque, conn: u32, bytes: []const u8) void,
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var h: Handler = undefined;
+        \\    _ = &h;
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const ctx = semantic.symbols.getSymbolNamed("ctx").?;
+    const conn = semantic.symbols.getSymbolNamed("conn").?;
+    const bytes = semantic.symbols.getSymbolNamed("bytes").?;
+
+    for (dead.items) |d| {
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = ctx }));
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = conn }));
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = bytes }));
+    }
+}
+
 test "fields of an anonymous struct returned from a reachable function stay reachable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

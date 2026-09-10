@@ -15,7 +15,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const zlint = @import("zlint");
 
+const File = @import("File.zig");
 const Project = @import("Project.zig");
 const Roots = @import("Roots.zig");
 const SymbolGraph = @import("SymbolGraph.zig");
@@ -122,7 +124,9 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
     for (project.files.items) |f| {
         var it = f.semantic.symbols.iter();
         while (it.next()) |local| {
-            if (f.semantic.symbols.get(local).flags.s_extern) continue;
+            const sym = f.semantic.symbols.get(local);
+            if (sym.flags.s_extern) continue;
+            if (sym.flags.s_fn_param and isBareFnTypeParam(&f, sym.decl)) continue;
             const id: SymbolId = .{ .file = f.id, .local = local };
             if (self.isReachable(id)) continue;
             try dead_ids.put(gpa, id, {});
@@ -154,6 +158,35 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
     }
 
     return dead;
+}
+
+/// Whether `decl` (a `s_fn_param` symbol's declaration node — its type
+/// expression, or, for an `anytype` param, its enclosing function's own
+/// node) belongs to a bare function-*type* expression (`*const fn (ctx:
+/// *anyopaque) void` used as a value/field type) rather than a real function
+/// declaration. Named parameters in the former are pure documentation —
+/// there's no scope in which referencing them would even be syntactically
+/// valid, so flagging them dead conveys nothing actionable.
+///
+/// Climbs `decl`'s parent chain looking for the nearest `fn_proto*` node;
+/// that node's own parent is `.fn_decl` for a real function declaration
+/// (which wraps a `fn_proto*` node together with a body) and anything else
+/// for a bare function-type expression (which stands alone, e.g. as a
+/// `container_field`'s type or wrapped in pointer/optional syntax).
+fn isBareFnTypeParam(f: *const File, decl: zlint.Semantic.Ast.Node.Index) bool {
+    const ast = &f.semantic.parse.ast;
+    if (ast.nodeTag(decl) == .fn_decl) return false;
+    var cur: ?zlint.Semantic.Ast.Node.Index = decl;
+    while (cur) |c| : (cur = f.semantic.node_links.getParent(c)) {
+        switch (ast.nodeTag(c)) {
+            .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {
+                const parent = f.semantic.node_links.getParent(c) orelse return true;
+                return ast.nodeTag(parent) != .fn_decl;
+            },
+            else => {},
+        }
+    }
+    return false;
 }
 
 /// The declaration `id`'s owner (per `OwnerMap`), or `null` if `id` isn't
