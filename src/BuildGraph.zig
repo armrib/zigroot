@@ -181,15 +181,16 @@ fn pathThroughHelperCall(tree: *const Ast, call: Ast.full.Call) ?Ast.TokenIndex 
     return tree.nodeMainToken(arg);
 }
 
-/// If `body` (a function's block) is exactly one statement, `return
-/// <recv>.path(<param>);`, returns the index of `<param>` among `proto`'s
-/// parameters.
+/// If `body` (a function's block) ends with `return <recv>.path(<param>);`
+/// — any statements before it don't matter, e.g. a leading path-validation
+/// call — returns the index of `<param>` among `proto`'s parameters.
 fn passThroughPathParamIndex(tree: *const Ast, proto: Ast.full.FnProto, body: Ast.Node.Index) ?usize {
     var stmt_buf: [2]Ast.Node.Index = undefined;
     const stmts = tree.blockStatements(&stmt_buf, body) orelse return null;
-    if (stmts.len != 1) return null;
-    if (tree.nodeTag(stmts[0]) != .@"return") return null;
-    const ret_expr = tree.nodeData(stmts[0]).opt_node.unwrap() orelse return null;
+    if (stmts.len == 0) return null;
+    const last = stmts[stmts.len - 1];
+    if (tree.nodeTag(last) != .@"return") return null;
+    const ret_expr = tree.nodeData(last).opt_node.unwrap() orelse return null;
 
     var call_buf: [1]Ast.Node.Index = undefined;
     const inner_call = tree.fullCall(&call_buf, ret_expr) orelse return null;
