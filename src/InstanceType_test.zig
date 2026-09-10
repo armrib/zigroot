@@ -112,9 +112,12 @@ test "crossFileRoot finds the base and field of a single field-access type annot
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const storage_id = sem.symbols.getSymbolNamed("storage").?;
     const s_id = sem.symbols.getSymbolNamed("s").?;
-    const root = InstanceType.crossFileRoot(&sem, s_id).?;
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, s_id).?;
     try t.expectEqual(storage_id, root.base);
     try t.expectEqualStrings("Widget", root.field);
 }
@@ -132,8 +135,34 @@ test "crossFileRoot returns null for a bare identifier type (not a field-access 
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const s_id = sem.symbols.getSymbolNamed("s").?;
-    try t.expectEqual(@as(?InstanceType.CrossFileRoot, null), InstanceType.crossFileRoot(&sem, s_id));
+    try t.expectEqual(@as(?InstanceType.CrossFileRoot, null), InstanceType.crossFileRoot(&sem, &owner_map, s_id));
+}
+
+test "crossFileRoot resolves a same-file chain leading up to the import-crossing hop" {
+    var sem = try build(
+        \\const mod = struct {
+        \\    pub const storage = 0;
+        \\};
+        \\fn a() void {
+        \\    var s: mod.storage.Widget = undefined;
+        \\    _ = &s;
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const storage_id = sem.symbols.getSymbolNamed("storage").?;
+    const s_id = sem.symbols.getSymbolNamed("s").?;
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, s_id).?;
+    try t.expectEqual(storage_id, root.base);
+    try t.expectEqualStrings("Widget", root.field);
 }
 
 test "a pointer-typed self parameter resolves to its declared type's symbol" {
@@ -181,9 +210,12 @@ test "crossFileRoot finds the base and field of a field-access-typed parameter" 
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const storage_id = sem.symbols.getSymbolNamed("storage").?;
     const self_id = sem.symbols.getSymbolNamed("self").?;
-    const root = InstanceType.crossFileRoot(&sem, self_id).?;
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, self_id).?;
     try t.expectEqual(storage_id, root.base);
     try t.expectEqualStrings("Widget", root.field);
 }

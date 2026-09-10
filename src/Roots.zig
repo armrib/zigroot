@@ -31,6 +31,7 @@ const FileId = @import("FileId.zig").FileId;
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
 const InstanceType = @import("InstanceType.zig");
+const OwnerMap = @import("OwnerMap.zig");
 const Semantic = zlint.Semantic;
 const Scope = Semantic.Scope;
 
@@ -101,7 +102,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
             const instance_ty = InstanceType.resolve(semantic, &f.owner_map, sym_id);
-            const cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, sym_id) else null;
+            const cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, &f.owner_map, sym_id) else null;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
@@ -154,8 +155,8 @@ const CrossInstanceType = struct { file: FileId, symbol: Semantic.Symbol.Id };
 /// export — same checks `Resolver.buildInstanceTypes` runs, duplicated here
 /// since `Roots` needs the answer per-symbol rather than building graph
 /// edges from it.
-fn crossInstanceType(project: *const Project, file_id: FileId, semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossInstanceType {
-    const root = InstanceType.crossFileRoot(semantic, sym_id) orelse return null;
+fn crossInstanceType(project: *const Project, file_id: FileId, semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?CrossInstanceType {
+    const root = InstanceType.crossFileRoot(semantic, owner_map, sym_id) orelse return null;
     const target_file_id = importTarget(project, file_id, root.base) orelse return null;
     const target_file = project.file(target_file_id);
     const ty = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, root.field) orelse return null;

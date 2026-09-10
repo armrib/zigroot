@@ -133,7 +133,7 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
             if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
-            const root = InstanceType.crossFileRoot(semantic, sym_id) orelse continue;
+            const root = InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) orelse continue;
 
             const target_file_id = importTarget(project, file.id, root.base) orelse continue;
             const target_file = project.file(target_file_id);
@@ -183,7 +183,7 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
             if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
-            if (InstanceType.crossFileRoot(semantic, sym_id) != null) continue;
+            if (InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) != null) continue;
             const fn_expr = InstanceType.callInit(semantic, sym_id) orelse continue;
 
             const fn_sym = resolveValueChain(project, file.id, fn_expr) orelse continue;

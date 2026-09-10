@@ -138,26 +138,27 @@ pub const CrossFileRoot = struct {
 
 /// If `sym_id`'s declared type expression (the same shapes `resolve` looks
 /// at: an explicit type annotation or a typed struct-literal initializer)
-/// is a single `base.field` hop off a plain identifier, that `(base,
-/// field)` pair — regardless of whether `base.field` resolves same-file.
-/// `resolve` already covers the case where it does; this is for a caller
-/// (`Resolver`) that can check whether `base` is an `@import` binding and
-/// continue the lookup into the target file's exports for the case where
-/// it doesn't (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
-pub fn crossFileRoot(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
+/// is a `base.field` hop whose `base` resolves same-file (a plain
+/// identifier, or a same-file chain of those, e.g. `mod.storage` in
+/// `mod.storage.Widget`), that `(base, field)` pair — regardless of
+/// whether `base.field` itself resolves same-file. `resolve` already
+/// covers the case where it does; this is for a caller (`Resolver`) that
+/// can check whether `base` is an `@import` binding and continue the
+/// lookup into the target file's exports for the case where it doesn't
+/// (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
+pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
     const candidates = declaredTypeNodes(semantic, sym_id);
     for (candidates.slice()) |type_node| {
-        if (fieldAccessRoot(semantic, type_node)) |root| return root;
+        if (fieldAccessRoot(semantic, owner_map, type_node)) |root| return root;
     }
     return null;
 }
 
-fn fieldAccessRoot(semantic: *const Semantic, node: Ast.Node.Index) ?CrossFileRoot {
+fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?CrossFileRoot {
     const ast = &semantic.parse.ast;
     if (ast.nodeTag(node) != .field_access) return null;
     const data = ast.nodeData(node).node_and_token;
-    if (ast.nodeTag(data[0]) != .identifier) return null;
-    const base = referenceAt(semantic, data[0]) orelse return null;
+    const base = resolveTypeExpr(semantic, owner_map, data[0]) orelse return null;
     return .{ .base = base, .field = semantic.tokenSlice(data[1]) };
 }
 
