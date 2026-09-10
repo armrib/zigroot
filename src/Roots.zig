@@ -2,8 +2,10 @@
 //! anything in the project references them.
 //!
 //! Populates these kinds automatically:
-//! - `executable_entry`: the `main` function declared in one of the
-//!   project's `--root` files.
+//! - `executable_entry`: `main`, `std_options`, and `panic` declared in one
+//!   of the project's `--root` files — names the Zig compiler itself looks
+//!   for structurally in a root source file, independent of whether
+//!   anything in user code references them by name.
 //! - `.export`: any symbol with ZLint's `s_export` flag (`export fn`,
 //!   `export var`), since those are reachable from outside the compiled
 //!   binary regardless of internal references.
@@ -86,16 +88,20 @@ fn add(self: *Roots, gpa: Allocator, symbol: SymbolId, kind: RootKind) Allocator
 }
 
 /// Collects every automatic root in `project`: each configured root file's
-/// top-level `main`, every `export`ed symbol, every symbol referenced from
-/// a `test` block, and (under `PublicPolicy.root`) every `pub` symbol.
+/// top-level `main`/`std_options`/`panic`, every `export`ed symbol, every
+/// symbol referenced from a `test` block, and (under `PublicPolicy.root`)
+/// every `pub` symbol.
 pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolicy) Allocator.Error!Roots {
     var roots: Roots = .empty;
     errdefer roots.deinit(gpa);
 
+    const compiler_recognized_names = [_][]const u8{ "main", "std_options", "panic" };
     for (project.roots.items) |file_id| {
         const semantic = &project.file(file_id).semantic;
-        if (semantic.symbols.getSymbolNamed("main")) |local| {
-            try roots.add(gpa, .{ .file = file_id, .local = local }, .executable_entry);
+        for (compiler_recognized_names) |name| {
+            if (semantic.symbols.getSymbolNamed(name)) |local| {
+                try roots.add(gpa, .{ .file = file_id, .local = local }, .executable_entry);
+            }
         }
     }
 

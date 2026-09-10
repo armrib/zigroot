@@ -39,6 +39,48 @@ test "a root file's main becomes an executable_entry root" {
     try t.expectEqual(Roots.RootKind.executable_entry, roots.roots.items[0].kind);
 }
 
+test "a root file's std_options and panic become executable_entry roots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const std = @import("std");
+        \\pub const std_options: std.Options = .{ .log_level = .info };
+        \\pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+        \\    _ = msg;
+        \\    _ = trace;
+        \\    _ = ret_addr;
+        \\    unreachable;
+        \\}
+        \\pub fn main() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    const std_options_id: SymbolId = .{ .file = file_id, .local = project.file(file_id).semantic.symbols.getSymbolNamed("std_options").? };
+    const panic_id: SymbolId = .{ .file = file_id, .local = project.file(file_id).semantic.symbols.getSymbolNamed("panic").? };
+
+    for ([_]SymbolId{ std_options_id, panic_id }) |expected| {
+        var found = false;
+        for (roots.roots.items) |root| {
+            if (root.symbol.eql(expected)) {
+                try t.expectEqual(Roots.RootKind.executable_entry, root.kind);
+                found = true;
+            }
+        }
+        try t.expect(found);
+    }
+}
+
 test "an export declaration is a root even with no references" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
