@@ -53,6 +53,15 @@ pub fn build(gpa: Allocator, semantic: *const Semantic) Allocator.Error!OwnerMap
         if (sym.flags.s_payload) continue;
         const decl = sym.decl;
         if (decl == Semantic.ROOT_NODE_ID) continue;
+        // An `anytype` parameter has no type-expression node, so ZLint
+        // declares it at the enclosing `fn_decl` — the same node the
+        // function symbol itself was declared at, just before its params
+        // were visited. A parameter never owns the function body; letting
+        // it claim the node would attribute every reference in the body to
+        // the parameter (same self-edge signature as the payload case
+        // above). The function is always registered first, so a param
+        // whose decl node is already claimed is exactly this case.
+        if (sym.flags.s_fn_param and decl_of.contains(decl)) continue;
         decl_of.putAssumeCapacity(decl, id);
     }
 

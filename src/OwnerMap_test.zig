@@ -98,6 +98,32 @@ test "a reference inside a while loop's payload body is owned by the enclosing f
     try t.expect(owner.?.eql(a_id));
 }
 
+test "a reference inside a function with an anytype parameter is owned by the function, not the parameter" {
+    var sem = try build(
+        \\fn a(args: anytype) void {
+        \\    _ = args;
+        \\    b();
+        \\}
+        \\fn b() void {}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const b_id = sem.symbols.getSymbolNamed("b").?;
+
+    const refs = sem.symbols.getReferences(b_id);
+    try t.expect(refs.len > 0);
+    const ref = sem.symbols.getReference(refs[0]);
+
+    const owner = owner_map.get(ref.node);
+    try t.expect(owner != null);
+    try t.expect(owner.?.eql(a_id));
+}
+
 test "a top-level declaration's initializer is owned by that declaration" {
     var sem = try build(
         \\fn compute() u32 { return 1; }

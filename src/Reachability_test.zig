@@ -6,6 +6,7 @@ const Project = @import("Project.zig");
 const Roots = @import("Roots.zig");
 const Reachability = @import("Reachability.zig");
 const Resolver = @import("Resolver.zig");
+const FileId = @import("FileId.zig").FileId;
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
@@ -96,6 +97,61 @@ test "a call chain reachable from main is not dead, even transitively" {
     inline for (.{ "a", "b", "c", "main" }) |name| {
         const id = semantic.symbols.getSymbolNamed(name).?;
         try t.expect(reachability.isReachable(.{ .file = file_id, .local = id }));
+    }
+}
+
+test "everything called from a function with an anytype parameter stays reachable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const helper = @import("helper.zig");
+        \\pub fn main() void { render("x", .{}); }
+        \\pub fn render(p: []const u8, args: anytype) void {
+        \\    local_helper();
+        \\    helper.format_it(p, args);
+        \\}
+        \\fn local_helper() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "helper.zig",
+        \\pub fn format_it(p: []const u8, args: anytype) void {
+        \\    _ = p;
+        \\    _ = args;
+        \\    deep();
+        \\}
+        \\fn deep() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const main_id = try project.addRoot(root_path);
+    const helper_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "helper.zig")) break f.id;
+    } else unreachable;
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const main_sem = &project.file(main_id).semantic;
+    inline for (.{ "helper", "p", "args", "local_helper" }) |name| {
+        const id = main_sem.symbols.getSymbolNamed(name).?;
+        try t.expect(reachability.isReachable(.{ .file = main_id, .local = id }));
+    }
+    const helper_sem = &project.file(helper_id).semantic;
+    inline for (.{ "format_it", "deep" }) |name| {
+        const id = helper_sem.symbols.getSymbolNamed(name).?;
+        try t.expect(reachability.isReachable(.{ .file = helper_id, .local = id }));
     }
 }
 
