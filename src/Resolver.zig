@@ -161,13 +161,13 @@ fn buildStuckFieldChains(gpa: Allocator, graph: *SymbolGraph, project: *const Pr
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
 
                 const chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
-                if (chain.stuck != null) {
+                if (chain.stuck != null or chain.stuck_call != null) {
                     try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
                 }
 
                 if (instance_ty) |ty| {
                     const inst_chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, ty, ref.node, .possible);
-                    if (inst_chain.stuck != null) {
+                    if (inst_chain.stuck != null or inst_chain.stuck_call != null) {
                         try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, ty, ref.node, .possible);
                     }
                 }
@@ -330,6 +330,15 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
     };
 
     const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return null;
+    return resolveFnReturnType(project, fn_sym);
+}
+
+/// `fn_sym`'s declared return type, resolved across as many `@import`
+/// boundaries as needed — the shared tail of `callInstanceType` (a call-init
+/// variable's callee) and `addChain`'s `stuck_call` handling (a call used
+/// directly as a field-access base, Phase 27). `null` if `fn_sym` isn't a
+/// function, or its declared return type doesn't resolve.
+fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
     const fn_semantic = &project.file(fn_sym.file).semantic;
     const fn_symbol = fn_semantic.symbols.get(fn_sym.local);
     if (!fn_symbol.flags.s_fn) return null;
@@ -470,17 +479,33 @@ fn addChain(
     var cur_owner_map = owner_map;
     var chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, start, start_node, start_kind);
 
-    while (chain.stuck) |stuck| {
-        const root = InstanceType.crossFileRoot(cur_symbols, cur_owner_map, stuck.symbol) orelse break;
-        const target = importTargetRoot(project, cur_file, root.base) orelse break;
-        const next_file = project.file(target.file);
-        const next_semantic = &next_file.semantic;
-        const ty = FieldChain.findExport(next_semantic, &next_file.owner_map, target.root, root.field) orelse break;
+    while (true) {
+        if (chain.stuck) |stuck| {
+            const root = InstanceType.crossFileRoot(cur_symbols, cur_owner_map, stuck.symbol) orelse break;
+            const target = importTargetRoot(project, cur_file, root.base) orelse break;
+            const next_file = project.file(target.file);
+            const next_semantic = &next_file.semantic;
+            const ty = FieldChain.findExport(next_semantic, &next_file.owner_map, target.root, root.field) orelse break;
 
-        cur_file = target.file;
-        cur_symbols = next_semantic;
-        cur_owner_map = &next_file.owner_map;
-        chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty, stuck.node, stuck.kind);
+            cur_file = target.file;
+            cur_symbols = next_semantic;
+            cur_owner_map = &next_file.owner_map;
+            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty, stuck.node, stuck.kind);
+            continue;
+        }
+
+        if (chain.stuck_call) |stuck_call| {
+            const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse break;
+            const ty_file = project.file(ty.file);
+
+            cur_file = ty.file;
+            cur_symbols = &ty_file.semantic;
+            cur_owner_map = &ty_file.owner_map;
+            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty.local, stuck_call.call_node, stuck_call.kind);
+            continue;
+        }
+
+        break;
     }
 
     const kind: SymbolGraph.EdgeKind = switch (chain.result.kind) {

@@ -62,6 +62,20 @@ pub const StuckHop = struct {
     kind: Kind,
 };
 
+/// Phase 27: mirrors `StuckHop`, for a call used directly as a field-access
+/// base (`cast(raw).putImpl()`) whose callee's declared return type crosses
+/// an `@import` boundary `InstanceType.fnReturnTypeNode` can't follow on its
+/// own.
+pub const StuckCall = struct {
+    /// The function symbol (declared in `symbols`) that was called.
+    fn_symbol: Semantic.Symbol.Id,
+    /// The call node itself — becomes the resumed walk's node once the
+    /// return type resolves, so a further `.field` hop off it resolves
+    /// against the return type.
+    call_node: Semantic.Ast.Node.Index,
+    kind: Kind,
+};
+
 pub const ChainWalk = struct {
     result: ChainResult,
     /// Set only if the walk stopped at a runtime-named `@field(...)` hop.
@@ -71,6 +85,10 @@ pub const ChainWalk = struct {
     /// the `Project` needed to finish it and resume the walk in the target
     /// file.
     stuck: ?StuckHop = null,
+    /// Set only if the walk stopped because a call's own declared return
+    /// type needs a cross-file resolution — see `Resolver`, mirroring
+    /// `stuck` above.
+    stuck_call: ?StuckCall = null,
 };
 
 /// Walks `start` (declared in `symbols`, first referenced at `start_node` in
@@ -130,6 +148,26 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
             continue;
         }
 
+        // Phase 27: `cast(raw).putImpl()` — `current.node` (`cast`) is used
+        // directly as a call's callee, and the call's result is itself
+        // field-accessed, with no intermediate variable to hang a declared
+        // type on. If `container` (the callee) is a function, its declared
+        // return type continues the chain the same way a field's declared
+        // type does above.
+        if (callAccessNode(ast, current.node)) |call_node| {
+            if (symbols.symbols.get(container).flags.s_fn) {
+                if (InstanceType.fnReturnTypeNode(symbols, container)) |return_node| {
+                    if (InstanceType.resolveTypeExpr(symbols, owner_map, return_node)) |ret_sym| {
+                        current = .{ .symbol = ret_sym, .node = call_node, .kind = .possible };
+                        continue;
+                    }
+                    if (InstanceType.fieldAccessRoot(symbols, owner_map, return_node) != null) {
+                        return .{ .result = current, .stuck_call = .{ .fn_symbol = container, .call_node = call_node, .kind = .possible } };
+                    }
+                }
+            }
+        }
+
         if (DynamicField.resolve(ast, symbols, container, current.node)) |resolution| switch (resolution) {
             .possible => |target| {
                 current = .{ .symbol = target, .node = ast.node_links.getParent(current.node).?, .kind = .possible };
@@ -166,6 +204,25 @@ pub fn arrayAccessNode(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Sem
     if (ast.parse.ast.nodeTag(parent) != .array_access) return null;
     const data = ast.parse.ast.nodeData(parent).node_and_node;
     if (data[0] != node) return null;
+    return parent;
+}
+
+/// If `node` is used as the callee of a call expression (`node(args)`) whose
+/// result is immediately field-accessed (`node(args).field`), the call node
+/// itself — the callee's return type, once resolved, is unwrapped onto it so
+/// a further `.field` hop off it resolves against the return type instead of
+/// the callee itself. `null` if `node` isn't a call callee (e.g. it's a call
+/// argument instead), or the call's result isn't field-accessed.
+pub fn callAccessNode(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    const parent = ast.node_links.getParent(node) orelse return null;
+    var buf: [1]Semantic.Ast.Node.Index = undefined;
+    const call = ast.parse.ast.fullCall(&buf, parent) orelse return null;
+    if (call.ast.fn_expr != node) return null;
+
+    const grandparent = ast.node_links.getParent(parent) orelse return null;
+    if (ast.parse.ast.nodeTag(grandparent) != .field_access) return null;
+    const data = ast.parse.ast.nodeData(grandparent).node_and_token;
+    if (data[0] != parent) return null;
     return parent;
 }
 

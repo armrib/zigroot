@@ -178,7 +178,7 @@ fn fieldTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast
 /// pointer/slice (`*Foo`, `*const Foo`, `[]Foo`, `[*]Foo`) or array
 /// (`[N]Foo`) wrapper around one of the above, unwrapped to resolve the
 /// element/child type.
-fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?Semantic.Symbol.Id {
+pub fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?Semantic.Symbol.Id {
     const ast = &semantic.parse.ast;
     if (ast.fullPtrType(node)) |ptr| return resolveTypeExpr(semantic, owner_map, ptr.ast.child_type);
     if (ast.fullArrayType(node)) |array| return resolveTypeExpr(semantic, owner_map, array.ast.elem_type);
@@ -384,7 +384,7 @@ pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_
     return null;
 }
 
-fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?CrossFileRoot {
+pub fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?CrossFileRoot {
     const ast = &semantic.parse.ast;
     var unwrapped = node;
     while (true) {
@@ -400,6 +400,38 @@ fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: 
     const data = ast.nodeData(unwrapped).node_and_token;
     const base = resolveTypeExpr(semantic, owner_map, data[0]) orelse return null;
     return .{ .base = base, .field = semantic.tokenSlice(data[1]) };
+}
+
+/// If `fn_sym_id` is a function symbol declared in `semantic`, its declared
+/// return-type expression node, unwrapped of one leading `!error_union`
+/// layer, one leading `?optional_type` layer, and one leading pointer — the
+/// same unwrapping `Resolver`'s cross-file call-return-type resolution does
+/// for a call-init variable's callee. `null` if `fn_sym_id` isn't a
+/// function, or its prototype can't be read.
+///
+/// Phase 27: shared by `FieldChain.resolveChain`'s same-file handling of a
+/// call used directly as a field-access base (`cast(raw).putImpl()`, no
+/// intermediate variable to hang a declared type on) — the call-init
+/// machinery above needs a variable symbol to key off; this needs only the
+/// function symbol being called.
+pub fn fnReturnTypeNode(semantic: *const Semantic, fn_sym_id: Semantic.Symbol.Id) ?Ast.Node.Index {
+    const symbol = semantic.symbols.get(fn_sym_id);
+    if (!symbol.flags.s_fn) return null;
+
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, symbol.decl) orelse return null;
+    var return_node = proto.ast.return_type.unwrap() orelse return null;
+    if (ast.nodeTag(return_node) == .error_union) {
+        return_node = ast.nodeData(return_node).node_and_node[1];
+    }
+    if (ast.nodeTag(return_node) == .optional_type) {
+        return_node = ast.nodeData(return_node).node;
+    }
+    if (ast.fullPtrType(return_node)) |ptr| {
+        return_node = ptr.ast.child_type;
+    }
+    return return_node;
 }
 
 /// If `sym_id` is a variable with no explicit type annotation, declared

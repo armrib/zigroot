@@ -93,6 +93,37 @@ test "Foo.bar() edges to both Foo and Foo's exported bar" {
     try t.expect(outgoing[1].to.eql(.{ .file = file, .local = bar_id }));
 }
 
+test "cast(raw).method() with no intermediate variable edges through cast's return type" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn method() void {}
+        \\};
+        \\fn cast(raw: *anyopaque) *Foo {
+        \\    return @ptrCast(@alignCast(raw));
+        \\}
+        \\fn a(raw: *anyopaque) void { cast(raw).method(); }
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const method_id = sem.symbols.getSymbolNamed("method").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var found_method = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = method_id })) found_method = true;
+    }
+    try t.expect(found_method);
+}
+
 test "Outer.Inner.run() chains through two nested containers" {
     var sem = try build(
         \\const Outer = struct {

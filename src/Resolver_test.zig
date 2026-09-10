@@ -872,6 +872,62 @@ test "a call-init chained through a cross-file-typed struct field's instance met
     try t.expect(!reachability.isReachable(.{ .file = inner_id, .local = unused_sym }));
 }
 
+test "a call chained directly off another call, with a cross-file return type, is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Issue 16: `cast(raw).putImpl()` — no intermediate variable to hang
+    // `cast`'s resolved return type on, and that return type itself crosses
+    // an `@import` boundary.
+    try writeFile(tmp.dir, "main.zig",
+        \\const target = @import("target.zig");
+        \\fn cast(raw: *anyopaque) *target.HttpClient {
+        \\    return @ptrCast(@alignCast(raw));
+        \\}
+        \\fn put(raw: *anyopaque) void {
+        \\    cast(raw).putImpl();
+        \\}
+        \\pub fn main() void {
+        \\    put(undefined);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "target.zig",
+        \\pub const HttpClient = struct {
+        \\    pub fn putImpl(self: *HttpClient) void { _ = self; }
+        \\    pub fn unused(self: *HttpClient) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const target_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "target.zig")) break f.id;
+    } else unreachable;
+    const target_semantic = &project.file(target_id).semantic;
+    const put_impl_sym = target_semantic.symbols.getSymbolNamed("putImpl").?;
+    const unused_sym = target_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = target_id, .local = put_impl_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = target_id, .local = unused_sym }));
+}
+
 test "an instance method reached through an if-payload capture of a cross-file-typed optional field is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
