@@ -629,6 +629,68 @@ test "an instance method reached through a cross-file-typed struct field is not 
     try t.expect(!reachability.isReachable(.{ .file = meta_state_id, .local = unused_sym }));
 }
 
+test "a call-init chained through a cross-file-typed struct field's instance method is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // The issue-10 shape: `state.table.get()`'s callee is itself an
+    // instance-field chain (`table`'s type crosses an `@import` boundary),
+    // and `get`'s own return type is a pointer to a further cross-file type.
+    try writeFile(tmp.dir, "main.zig",
+        \\const t = @import("table.zig");
+        \\pub const State = struct {
+        \\    table: t.Table,
+        \\};
+        \\pub fn main() void {
+        \\    var state: State = undefined;
+        \\    const inner = state.table.get() catch return;
+        \\    inner.used_only_via_chain();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "table.zig",
+        \\const i = @import("inner.zig");
+        \\pub const Table = struct {
+        \\    pub fn get(self: *Table) !*i.Inner { _ = self; unreachable; }
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "inner.zig",
+        \\pub const Inner = struct {
+        \\    pub fn used_only_via_chain(self: *Inner) void { _ = self; }
+        \\    pub fn unused(self: *Inner) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const inner_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "inner.zig")) break f.id;
+    } else unreachable;
+    const inner_semantic = &project.file(inner_id).semantic;
+    const used_sym = inner_semantic.symbols.getSymbolNamed("used_only_via_chain").?;
+    const unused_sym = inner_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = inner_id, .local = used_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = inner_id, .local = unused_sym }));
+}
+
 test "an instance method reached through an if-payload capture of a cross-file-typed optional field is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

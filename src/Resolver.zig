@@ -332,6 +332,9 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
     if (fn_ast.nodeTag(return_node) == .optional_type) {
         return_node = fn_ast.nodeData(return_node).node;
     }
+    if (fn_ast.fullPtrType(return_node)) |ptr| {
+        return_node = ptr.ast.child_type;
+    }
 
     if (isTypeKeyword(fn_semantic, return_node)) {
         const fn_owner_map = &project.file(fn_sym.file).owner_map;
@@ -377,16 +380,51 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
 /// `FieldChain.findExport`, which already unwraps a `@This()` alias `base`
 /// might be), then — if `base` is itself bound to an `@import` (a
 /// re-export) — against the target file's exports instead.
+///
+/// Issue 10: if neither matches, `base` isn't a container/import binding
+/// itself but a field or variable whose own *declared type* is — the
+/// `state.channels.get_or_open()` shape, where `channels: table.ChannelTable`
+/// is a container field. `declaredType` resolves that type (same-file or
+/// across the `@import` boundary it's declared with, same as
+/// `FieldChain.resolveChain`'s in-chain redirection does for a stuck hop —
+/// see `addChain`), and the hop is retried against it.
 fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
     const base_file = project.file(base.file);
     if (FieldChain.findExport(&base_file.semantic, &base_file.owner_map, base.local, field)) |found| {
         return .{ .file = base.file, .local = found };
     }
 
-    const target = importTargetRoot(project, base.file, base.local) orelse return null;
+    if (importTargetRoot(project, base.file, base.local)) |target| {
+        const target_file = project.file(target.file);
+        if (FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, field)) |found| {
+            return .{ .file = target.file, .local = found };
+        }
+    }
+
+    const ty = declaredType(project, base) orelse return null;
+    return hop(project, ty, field);
+}
+
+/// `base`'s own declared type, resolved same-file via `InstanceType.resolve`
+/// or, if the type expression itself crosses an `@import` boundary
+/// (`InstanceType.crossFileRoot`), by resolving that boundary the same way
+/// `importTargetRoot` + `FieldChain.findExport` already do for a binding's
+/// own field hops above. `null` if `base` has no syntactically-resolvable
+/// declared type.
+fn declaredType(project: *const Project, base: SymbolId) ?SymbolId {
+    const base_file = project.file(base.file);
+    const semantic = &base_file.semantic;
+    const owner_map = &base_file.owner_map;
+
+    if (InstanceType.resolve(semantic, owner_map, base.local)) |ty| {
+        return .{ .file = base.file, .local = ty };
+    }
+
+    const root = InstanceType.crossFileRoot(semantic, owner_map, base.local) orelse return null;
+    const target = importTargetRoot(project, base.file, root.base) orelse return null;
     const target_file = project.file(target.file);
-    const found = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, field) orelse return null;
-    return .{ .file = target.file, .local = found };
+    const ty = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, root.field) orelse return null;
+    return .{ .file = target.file, .local = ty };
 }
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
