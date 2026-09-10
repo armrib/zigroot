@@ -108,11 +108,26 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
             break;
         }
 
-        if (type_resolved != null) {
-            if (arrayAccessNode(ast, current.node)) |access_node| {
-                current = .{ .symbol = container, .node = access_node, .kind = hop_kind };
-                continue;
+        if (arrayAccessNode(ast, current.node)) |access_node| {
+            // Mirrors the `fieldAccessName` stuck-fallback above: an
+            // unresolved `type_resolved` means `container` fell back to
+            // `current.symbol` itself (the slice/array field, not its
+            // element type) — if that field's declared type crosses an
+            // `@import` boundary (`conns: []conn_mod.Conn`), hand back to
+            // `Resolver` instead of indexing into the field symbol as if it
+            // were already the element type. Once `Resolver` resumes the
+            // walk with the resolved element type as the new `current.symbol`,
+            // `crossFileRoot` has nothing left to find (a container has no
+            // declared type of its own), so this falls through to the hop
+            // below using it directly, same as the same-file `type_resolved
+            // != null` case always has.
+            if (type_resolved == null and container == current.symbol) {
+                if (InstanceType.crossFileRoot(symbols, owner_map, current.symbol) != null) {
+                    return .{ .result = current, .stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible } };
+                }
             }
+            current = .{ .symbol = container, .node = access_node, .kind = hop_kind };
+            continue;
         }
 
         if (DynamicField.resolve(ast, symbols, container, current.node)) |resolution| switch (resolution) {
