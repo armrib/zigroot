@@ -76,12 +76,22 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
 
         if (tree.fullVarDecl(node)) |var_decl| {
             const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+            const var_name_tok = var_decl.ast.mut_token + 1;
+            const var_name = tree.tokenSlice(var_name_tok);
+
             if (rootSourceFileOfCreateModule(&tree, init_node, &call_buf, &struct_buf)) |rel_path| {
-                const name_tok = var_decl.ast.mut_token + 1;
-                const name = tree.tokenSlice(name_tok);
                 const path = parseStringLiteral(gpa, &tree, rel_path) catch continue;
                 errdefer gpa.free(path);
-                try bindings.put(gpa, name, path);
+                try bindings.put(gpa, var_name, path);
+                continue;
+            }
+
+            if (tree.fullCall(&call_buf, init_node)) |call| {
+                if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
+                    const path = parseStringLiteral(gpa, &tree, found.path) catch continue;
+                    errdefer gpa.free(path);
+                    try bindings.put(gpa, var_name, path);
+                }
             }
             continue;
         }
@@ -97,6 +107,21 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
 
         const call = tree.fullCall(&call_buf, node) orelse continue;
         const field = fieldAccessName(&tree, call.ast.fn_expr) orelse continue;
+
+        if (std.mem.eql(u8, field, "addModule")) {
+            if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
+                const import_name = parseStringLiteral(gpa, &tree, found.name) catch continue;
+                errdefer gpa.free(import_name);
+                const path = parseStringLiteral(gpa, &tree, found.path) catch {
+                    gpa.free(import_name);
+                    continue;
+                };
+                defer gpa.free(path);
+                try addModulePath(gpa, &result, import_name, path);
+            }
+            continue;
+        }
+
         if (!std.mem.eql(u8, field, "addImport")) continue;
         if (call.ast.params.len < 2) continue;
 
@@ -139,7 +164,37 @@ fn rootSourceFileOfCreateModule(
     if (!std.mem.eql(u8, field, "createModule")) return null;
     if (call.ast.params.len < 1) return null;
 
-    const options = call.ast.params[0];
+    return rootSourceFileFromOptions(tree, call.ast.params[0], struct_buf);
+}
+
+/// If `node` is `<ident>.addModule("name", .{ ..., .root_source_file =
+/// b.path("...") , ... })` — the single-call shape that both names and
+/// creates a module, unlike `createModule` which needs a separate
+/// `addImport`/`.imports` to be reachable by name — the module name and
+/// the token index of the inner root-source-file string literal (same
+/// extraction, and same pass-through-helper handling, as
+/// `rootSourceFileOfCreateModule`).
+fn nameAndRootSourceFileOfAddModule(
+    tree: *const Ast,
+    call: Ast.full.Call,
+    struct_buf: *[2]Ast.Node.Index,
+) ?struct { name: Ast.TokenIndex, path: Ast.TokenIndex } {
+    const field = fieldAccessName(tree, call.ast.fn_expr) orelse return null;
+    if (!std.mem.eql(u8, field, "addModule")) return null;
+    if (call.ast.params.len < 2) return null;
+
+    const name_node = call.ast.params[0];
+    if (tree.nodeTag(name_node) != .string_literal) return null;
+
+    const path = rootSourceFileFromOptions(tree, call.ast.params[1], struct_buf) orelse return null;
+    return .{ .name = tree.nodeMainToken(name_node), .path = path };
+}
+
+/// Finds the `.root_source_file = b.path("...")` field (or a pass-through
+/// helper call in its place, see `pathThroughHelperCall`) in `options` — a
+/// `.{ ... }` struct-literal node — and returns the token index of the
+/// string literal it resolves to.
+fn rootSourceFileFromOptions(tree: *const Ast, options: Ast.Node.Index, struct_buf: *[2]Ast.Node.Index) ?Ast.TokenIndex {
     const struct_init = tree.fullStructInit(struct_buf, options) orelse return null;
     for (struct_init.ast.fields) |field_value| {
         const name_tok = tree.firstToken(field_value) - 2;

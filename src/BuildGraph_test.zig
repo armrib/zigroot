@@ -26,6 +26,55 @@ test "resolves a locally-created module bound with addImport" {
     try t.expectEqualStrings("src/storage.zig", paths[0]);
 }
 
+test "resolves a module published with b.addModule, with no further addImport/.imports wiring" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("storage", .{
+        \\        .root_source_file = b.path("src/storage.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    _ = exe;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("storage").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("src/storage.zig", paths[0]);
+}
+
+test "resolves a module published with b.addModule and wired into another module's inline .imports" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const compiler_mod = b.addModule("db_compiler", .{
+        \\        .root_source_file = b.path("db-compiler/src/root.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{
+        \\            .root_source_file = b.path("db-compiler/src/main.zig"),
+        \\            .imports = &.{
+        \\                .{ .name = "db_compiler", .module = compiler_mod },
+        \\            },
+        \\        }),
+        \\    });
+        \\    _ = exe;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("db_compiler").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("db-compiler/src/root.zig", paths[0]);
+}
+
 test "a module sourced from a dependency stays unresolved" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");
