@@ -116,22 +116,27 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
                     try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
                     continue;
                 };
-                const rel_path = build_graph.resolve(entry.specifier) orelse {
+                const rel_paths = build_graph.resolve(entry.specifier) orelse {
                     try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
                     continue;
                 };
 
-                const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
-                    continue;
-                };
-                defer self.gpa.free(target_path);
+                // More than one candidate means the scan couldn't tell
+                // which branch of a conditional the build script actually
+                // takes (see BuildGraph.zig); treat every candidate as
+                // reachable rather than guessing.
+                var resolved_any = false;
+                for (rel_paths) |rel_path| {
+                    const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+                    defer self.gpa.free(target_path);
 
-                const target_id = self.loadRecursive(target_path) catch {
+                    const target_id = self.loadRecursive(target_path) catch continue;
+                    try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
+                    resolved_any = true;
+                }
+                if (!resolved_any) {
                     try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
-                    continue;
-                };
-                try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
+                }
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.specifier, ".zig")) {

@@ -7,6 +7,15 @@
 //! of the build script (that would require running it). Modules that come
 //! from `b.dependency(...).module(...)` aren't backed by a local file and
 //! are left unresolved, same as before this phase existed.
+//!
+//! An import name can resolve to more than one candidate path: when
+//! `addImport("name", ...)` is called more than once for the same name
+//! (e.g. once per branch of a `target.os.tag` switch/if, each binding a
+//! different `createModule`), the scan can't tell which branch actually
+//! runs without evaluating the build script. It keeps every candidate and
+//! treats all of them as reachable, rather than guessing based on AST
+//! order — that avoids false orphan/dead reports for whichever branch
+//! it would otherwise have discarded.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -14,9 +23,11 @@ const Ast = std.zig.Ast;
 
 const BuildGraph = @This();
 
-/// import name -> root source file path, relative to the `build.zig`'s
-/// directory. Owned (both keys and values).
-modules: std.StringHashMapUnmanaged([]const u8) = .empty,
+/// import name -> candidate root source file paths, relative to the
+/// `build.zig`'s directory. Usually one path; more than one when the
+/// same import name is bound via `addImport` in more than one place
+/// (e.g. an OS-conditional module). Owned (keys and every path).
+modules: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty,
 
 pub const empty: BuildGraph = .{};
 
@@ -24,14 +35,18 @@ pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     var it = self.modules.iterator();
     while (it.next()) |entry| {
         gpa.free(entry.key_ptr.*);
-        gpa.free(entry.value_ptr.*);
+        for (entry.value_ptr.items) |path| gpa.free(path);
+        entry.value_ptr.deinit(gpa);
     }
     self.modules.deinit(gpa);
     self.* = undefined;
 }
 
-pub fn resolve(self: *const BuildGraph, name: []const u8) ?[]const u8 {
-    return self.modules.get(name);
+/// Returns every candidate root source file path `name` resolves to, or
+/// `null` if `name` isn't a locally-created module.
+pub fn resolve(self: *const BuildGraph, name: []const u8) ?[]const []const u8 {
+    const paths = self.modules.getPtr(name) orelse return null;
+    return paths.items;
 }
 
 /// Parses `source` (a `build.zig`'s contents) and extracts its local
@@ -86,11 +101,21 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
         const gop = try result.modules.getOrPut(gpa, import_name);
         if (gop.found_existing) {
             gpa.free(import_name);
-            gpa.free(gop.value_ptr.*);
         } else {
             gop.key_ptr.* = import_name;
+            gop.value_ptr.* = .empty;
         }
-        gop.value_ptr.* = try gpa.dupe(u8, rel_path);
+
+        const dup_path = try gpa.dupe(u8, rel_path);
+        errdefer gpa.free(dup_path);
+        for (gop.value_ptr.items) |existing| {
+            if (std.mem.eql(u8, existing, dup_path)) {
+                gpa.free(dup_path);
+                break;
+            }
+        } else {
+            try gop.value_ptr.append(gpa, dup_path);
+        }
     }
 
     // `bindings`' values are owned by `result` iff still referenced; free

@@ -98,9 +98,16 @@ Status: Phase 0-16. Implemented so far:
 Not yet implemented: an instance type named through a same-file chain
 *before* crossing an `@import` boundary (`var s: mod.storage.Widget =
 ...`), a nested `const Self = @This();` alias (only the file-top-level case
-resolves), per-target file sets in `build.zig` (e.g. `linux.zig` vs
-`windows.zig` chosen by target), and a few other gaps found by running
-against a real codebase. See `issues/` for the full list.
+resolves), and a few other gaps found by running against a real codebase.
+See `issues/` for the full list.
+
+`BuildGraph` doesn't evaluate `build.zig`'s control flow (that would mean
+actually running it), so it can't tell which branch of a per-target file
+set (e.g. `linux.zig` vs `windows.zig` picked by `target.os.tag`) actually
+runs. Rather than guess, it keeps every `addImport`-bound candidate for a
+given import name and treats them all as reachable — over-approximating
+reachability instead of risking a false orphan/dead report for the branch
+not taken.
 
 ## Build
 
