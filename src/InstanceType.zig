@@ -150,9 +150,14 @@ fn fieldTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast
 /// Resolves a type-position expression node to the symbol it names: a bare
 /// identifier (looked up via the `Reference` ZLint already recorded for it,
 /// since it's a normal identifier use), a same-file `container.member`
-/// chain of those, or an optional (`?Foo`, unwrapped to resolve `Foo`).
+/// chain of those, an optional (`?Foo`, unwrapped to resolve `Foo`), or any
+/// pointer/slice (`*Foo`, `*const Foo`, `[]Foo`, `[*]Foo`) or array
+/// (`[N]Foo`) wrapper around one of the above, unwrapped to resolve the
+/// element/child type.
 fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?Semantic.Symbol.Id {
     const ast = &semantic.parse.ast;
+    if (ast.fullPtrType(node)) |ptr| return resolveTypeExpr(semantic, owner_map, ptr.ast.child_type);
+    if (ast.fullArrayType(node)) |array| return resolveTypeExpr(semantic, owner_map, array.ast.elem_type);
     return switch (ast.nodeTag(node)) {
         .identifier => referenceAt(semantic, node),
         .field_access => blk: {
@@ -227,7 +232,16 @@ pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_
 
 fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?CrossFileRoot {
     const ast = &semantic.parse.ast;
-    const unwrapped = if (ast.nodeTag(node) == .optional_type) ast.nodeData(node).node else node;
+    var unwrapped = node;
+    while (true) {
+        if (ast.fullPtrType(unwrapped)) |ptr| {
+            unwrapped = ptr.ast.child_type;
+        } else if (ast.fullArrayType(unwrapped)) |array| {
+            unwrapped = array.ast.elem_type;
+        } else if (ast.nodeTag(unwrapped) == .optional_type) {
+            unwrapped = ast.nodeData(unwrapped).node;
+        } else break;
+    }
     if (ast.nodeTag(unwrapped) != .field_access) return null;
     const data = ast.nodeData(unwrapped).node_and_token;
     const base = resolveTypeExpr(semantic, owner_map, data[0]) orelse return null;
