@@ -166,6 +166,29 @@ pub fn main() !u8 {
     var reported_cycles: std.AutoHashMapUnmanaged(zigroot.Scc.ComponentId, void) = .empty;
     defer reported_cycles.deinit(gpa);
 
+    var dead_count: usize = 0;
+    for (dead.items) |d| {
+        if (d.possible and !opts.include_possible) continue;
+        const name = project.symbol(d.id).name;
+        if (name.len == 0) continue;
+
+        if (scc.componentOf(d.id)) |component| {
+            if (scc.isCyclic(component)) {
+                if (reported_cycles.contains(component)) continue;
+                try reported_cycles.put(gpa, component, {});
+                dead_count += 1;
+                continue;
+            }
+        }
+
+        dead_count += 1;
+    }
+    reported_cycles.clearRetainingCapacity();
+
+    if (dead_count > 0) {
+        std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead_count});
+    }
+
     var reported: usize = 0;
     for (dead.items) |d| {
         if (d.possible and !opts.include_possible) continue;
@@ -176,7 +199,6 @@ pub fn main() !u8 {
             if (scc.isCyclic(component)) {
                 if (reported_cycles.contains(component)) continue;
                 try reported_cycles.put(gpa, component, {});
-                if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
                 reported += 1;
                 std.debug.print("  cycle of {d} declaration(s), unreachable from any root:\n", .{scc.members(component).len});
                 for (scc.members(component)) |member| {
@@ -188,7 +210,6 @@ pub fn main() !u8 {
             }
         }
 
-        if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
         reported += 1;
         std.debug.print("  {s}: {s}", .{ project.file(d.id.file).path, name });
         if (d.nested > 0) std.debug.print(" (+{d} nested)", .{d.nested});
