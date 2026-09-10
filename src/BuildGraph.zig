@@ -114,7 +114,7 @@ pub fn parseInto(
             if (rootSourceFileOfCreateModule(&tree, init_node, &call_buf, &struct_buf)) |rel_path| {
                 const path = parseStringLiteral(gpa, &tree, rel_path) catch continue;
                 errdefer gpa.free(path);
-                try bindings.put(gpa, var_name, path);
+                try putBinding(gpa, &bindings, var_name, path);
                 continue;
             }
 
@@ -122,7 +122,7 @@ pub fn parseInto(
                 if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
                     const path = parseStringLiteral(gpa, &tree, found.path) catch continue;
                     errdefer gpa.free(path);
-                    try bindings.put(gpa, var_name, path);
+                    try putBinding(gpa, &bindings, var_name, path);
                     continue;
                 }
             }
@@ -423,6 +423,18 @@ fn fieldAccessName(tree: *const Ast, node: Ast.Node.Index) ?[]const u8 {
     if (tree.nodeTag(node) != .field_access) return null;
     const data = tree.nodeData(node).node_and_token;
     return tree.tokenSlice(data[1]);
+}
+
+/// Binds `var_name` to `path` in `bindings`, freeing whatever `path` it
+/// previously owned first. Local variable names aren't unique across a
+/// `build.zig`'s sibling blocks (e.g. `{ const m = ...; ... }` repeated per
+/// `b.addTest`, each `m` scoped to its own block but sharing this flat,
+/// scope-unaware map) — without this, a later shadowing bind would leak
+/// the earlier one's `path`.
+fn putBinding(gpa: Allocator, bindings: *std.StringHashMapUnmanaged([]const u8), var_name: []const u8, path: []const u8) !void {
+    const gop = try bindings.getOrPut(gpa, var_name);
+    if (gop.found_existing) gpa.free(gop.value_ptr.*);
+    gop.value_ptr.* = path;
 }
 
 fn parseStringLiteral(gpa: Allocator, tree: *const Ast, token: Ast.TokenIndex) ![]u8 {

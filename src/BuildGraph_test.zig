@@ -247,3 +247,29 @@ test "parseInto collects local-file @import specifiers, not package/module names
     try t.expectEqual(@as(usize, 1), file_imports.items.len);
     try t.expectEqualStrings("build/helper.zig", file_imports.items[0]);
 }
+
+test "a local variable name reused across sibling blocks doesn't leak the shadowed binding" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    {
+        \\        const m = b.createModule(.{ .root_source_file = b.path("tests/a_test.zig") });
+        \\        _ = m;
+        \\    }
+        \\    {
+        \\        const m = b.createModule(.{ .root_source_file = b.path("tests/b_test.zig") });
+        \\        exe.root_module.addImport("b_test", m);
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("b_test").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("tests/b_test.zig", paths[0]);
+}
