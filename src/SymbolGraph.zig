@@ -125,6 +125,18 @@ pub fn outgoing(self: *const SymbolGraph, from: SymbolId) []const Target {
 /// from the anonymous container's member nodes) against the container
 /// node `anonymousContainer` unwraps from the return-type/parameter
 /// expression (a leading pointer/slice/array, an `?`, or a `!` error union).
+///
+/// Phase 26: a `type`-returning function (`fn Foo(comptime N: usize) type`)
+/// doesn't spell its actual container in the signature at all — Phase 25's
+/// scan finds only the bare `type` keyword there. The real container is a
+/// `return struct {...};` statement in the function's body, the standard
+/// generic-container idiom. When the return type is the `type` keyword,
+/// this additionally scans the function body's direct statements for such
+/// a `return <container-decl>;` and edges the function to its fields the
+/// same way. A variable typed from *calling* such a function (`var x:
+/// Foo(4) = ...`) resolving through to those fields is a separate,
+/// instance-typing concern — this only covers the function's own
+/// reachability edge to its returned struct's members.
 pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map: *const OwnerMap) Allocator.Error!SymbolGraph {
     var graph: SymbolGraph = .empty;
     errdefer graph.deinit(gpa);
@@ -182,6 +194,9 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             if (ast.fullFnProto(&proto_buf, symbol.decl)) |proto| {
                 if (proto.ast.return_type.unwrap()) |return_type| {
                     try edgeAnonymousContainerFields(gpa, &graph, file, semantic, &decl_index, sym_id, return_type);
+                    if (isTypeKeyword(semantic, return_type)) {
+                        try edgeReturnedContainerFields(gpa, &graph, file, semantic, &decl_index, sym_id, symbol.decl);
+                    }
                 }
                 var param_it = proto.iterate(ast);
                 while (param_it.next()) |param| {
@@ -247,11 +262,69 @@ fn edgeAnonymousContainerFields(
 ) Allocator.Error!void {
     const ast = &semantic.parse.ast;
     const container_node = anonymousContainer(ast, type_node) orelse return;
+    try edgeContainerFields(gpa, graph, file, decl_index, from, ast, container_node);
+}
 
+/// A `.definite` edge from `from` to each of `container_node`'s field/
+/// declaration symbols, found the same way `edgeAnonymousContainerFields`
+/// does — via `decl_index`, since these fields were attached as members of
+/// whichever *named* container symbol happened to be on ZLint's
+/// container-symbol stack, not of the anonymous container itself.
+fn edgeContainerFields(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    file: FileId,
+    decl_index: *const std.AutoHashMapUnmanaged(Semantic.Ast.Node.Index, Semantic.Symbol.Id),
+    from: Semantic.Symbol.Id,
+    ast: *const Semantic.Ast,
+    container_node: Semantic.Ast.Node.Index,
+) Allocator.Error!void {
     var buf: [2]Semantic.Ast.Node.Index = undefined;
     const container = ast.fullContainerDecl(&buf, container_node) orelse return;
     for (container.ast.members) |member_node| {
         const member_id = decl_index.get(member_node) orelse continue;
         try graph.addEdge(gpa, .{ .file = file, .local = from }, .{ .file = file, .local = member_id }, member_node, .definite);
+    }
+}
+
+/// Whether `node` is the bare `type` keyword — the return-type spelling of a
+/// generic type-returning function (`fn Foo(comptime N: usize) type { ...
+/// }`), as opposed to a value's own type. ZLint parses it as a plain
+/// identifier, so this just checks the token text.
+fn isTypeKeyword(semantic: *const Semantic, node: Semantic.Ast.Node.Index) bool {
+    const ast = &semantic.parse.ast;
+    return ast.nodeTag(node) == .identifier and std.mem.eql(u8, semantic.tokenSlice(ast.nodeMainToken(node)), "type");
+}
+
+/// Phase 26: a `type`-returning function's actual container isn't spelled
+/// in its signature at all (just the bare `type` keyword) — it's a
+/// `return struct {...};` statement in the body, the standard
+/// generic-container idiom (`fn FixedList(comptime N: usize) type { return
+/// struct { items: [N]u8 = undefined, len: usize = 0 }; }`). Scans the
+/// function body's direct statements (not a recursive walk — matches Phase
+/// 25's scope of "declared inline", now extended to the body's top level)
+/// for a `return <container-decl>;` and edges the function to that
+/// container's fields the same way Phase 25 does for a signature-position
+/// anonymous container.
+fn edgeReturnedContainerFields(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    file: FileId,
+    semantic: *const Semantic,
+    decl_index: *const std.AutoHashMapUnmanaged(Semantic.Ast.Node.Index, Semantic.Symbol.Id),
+    from: Semantic.Symbol.Id,
+    decl_node: Semantic.Ast.Node.Index,
+) Allocator.Error!void {
+    const ast = &semantic.parse.ast;
+    if (ast.nodeTag(decl_node) != .fn_decl) return;
+    const body_node = ast.nodeData(decl_node).node_and_node[1];
+
+    var stmt_buf: [2]Semantic.Ast.Node.Index = undefined;
+    const statements = ast.blockStatements(&stmt_buf, body_node) orelse return;
+    for (statements) |stmt| {
+        if (ast.nodeTag(stmt) != .@"return") continue;
+        const return_expr = ast.nodeData(stmt).opt_node.unwrap() orelse continue;
+        const container_node = anonymousContainer(ast, return_expr) orelse continue;
+        try edgeContainerFields(gpa, graph, file, decl_index, from, ast, container_node);
     }
 }

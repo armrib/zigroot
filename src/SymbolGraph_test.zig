@@ -426,6 +426,40 @@ test "a function edges to the fields of an anonymous struct in a parameter's typ
     try t.expect(found);
 }
 
+test "a type-returning function edges to the fields of a struct returned from its body" {
+    var sem = try build(
+        \\fn FixedList(comptime N: usize) type {
+        \\    return struct {
+        \\        items: [N]u8 = undefined,
+        \\        len: usize = 0,
+        \\    };
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const fixed_list_id = sem.symbols.getSymbolNamed("FixedList").?;
+    const items_id = sem.symbols.getSymbolNamed("items").?;
+    const len_id = sem.symbols.getSymbolNamed("len").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = fixed_list_id });
+    var found_items = false;
+    var found_len = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = items_id })) found_items = true;
+        if (edge.to.eql(.{ .file = file, .local = len_id })) found_len = true;
+    }
+    try t.expect(found_items);
+    try t.expect(found_len);
+}
+
 test "an unreferenced declaration has no outgoing edges" {
     var sem = try build(
         \\fn a() void {}
