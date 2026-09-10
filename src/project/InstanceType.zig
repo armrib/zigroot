@@ -37,6 +37,7 @@ const zlint = @import("zlint");
 const Semantic = zlint.Semantic;
 const Ast = Semantic.Ast;
 const FieldChain = @import("FieldChain.zig");
+const OwnerMap = @import("OwnerMap.zig");
 
 /// If `sym_id` is a variable (`var`/`const`) declared with a syntactically
 /// resolvable type — an explicit type annotation, or an explicitly-typed
@@ -46,12 +47,12 @@ const FieldChain = @import("FieldChain.zig");
 /// `sym_id` is neither, has no such type expression, or the type expression
 /// isn't a plain identifier / same-file `.field` chain to one (e.g. it's an
 /// optional, a generic instantiation, or crosses an `@import` boundary).
-pub fn resolve(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const symbol = semantic.symbols.get(sym_id);
 
     if (symbol.flags.s_fn_param) {
         const type_node = paramTypeNode(semantic, symbol) orelse return null;
-        return resolveTypeExpr(semantic, type_node);
+        return resolveTypeExpr(semantic, owner_map, type_node);
     }
 
     if (!symbol.flags.s_variable) return null;
@@ -60,14 +61,14 @@ pub fn resolve(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Semantic.
     const decl = ast.fullVarDecl(symbol.decl) orelse return null;
 
     if (decl.ast.type_node.unwrap()) |type_node| {
-        if (resolveTypeExpr(semantic, type_node)) |ty| return ty;
+        if (resolveTypeExpr(semantic, owner_map, type_node)) |ty| return ty;
     }
 
     const init_node = decl.ast.init_node.unwrap() orelse return null;
     var buf: [2]Ast.Node.Index = undefined;
     const struct_init = ast.fullStructInit(&buf, init_node) orelse return null;
     const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
-    return resolveTypeExpr(semantic, type_expr);
+    return resolveTypeExpr(semantic, owner_map, type_expr);
 }
 
 /// A function parameter symbol's declared type node, with one leading
@@ -86,14 +87,14 @@ fn paramTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast
 /// identifier (looked up via the `Reference` ZLint already recorded for it,
 /// since it's a normal identifier use), or a same-file `container.member`
 /// chain of those.
-fn resolveTypeExpr(semantic: *const Semantic, node: Ast.Node.Index) ?Semantic.Symbol.Id {
+fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, node: Ast.Node.Index) ?Semantic.Symbol.Id {
     const ast = &semantic.parse.ast;
     return switch (ast.nodeTag(node)) {
         .identifier => referenceAt(semantic, node),
         .field_access => blk: {
             const data = ast.nodeData(node).node_and_token;
-            const base = resolveTypeExpr(semantic, data[0]) orelse break :blk null;
-            break :blk FieldChain.findExport(semantic, base, semantic.tokenSlice(data[1]));
+            const base = resolveTypeExpr(semantic, owner_map, data[0]) orelse break :blk null;
+            break :blk FieldChain.findExport(semantic, owner_map, base, semantic.tokenSlice(data[1]));
         },
         else => null,
     };

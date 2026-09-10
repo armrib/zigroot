@@ -5,6 +5,7 @@ const t = std.testing;
 const zlint = @import("zlint");
 const Semantic = zlint.Semantic;
 const InstanceType = @import("InstanceType.zig");
+const OwnerMap = @import("OwnerMap.zig");
 
 fn build(src: [:0]const u8) !Semantic {
     var builder = Semantic.Builder.init(t.allocator);
@@ -27,10 +28,13 @@ test "explicit type annotation resolves to the annotated type's symbol" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
     const s_id = sem.symbols.getSymbolNamed("s").?;
 
-    try t.expectEqual(foo_id, InstanceType.resolve(&sem, s_id).?);
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, &owner_map, s_id).?);
 }
 
 test "explicitly-typed struct-literal initializer resolves to the type's symbol" {
@@ -46,10 +50,13 @@ test "explicitly-typed struct-literal initializer resolves to the type's symbol"
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
     const s_id = sem.symbols.getSymbolNamed("s").?;
 
-    try t.expectEqual(foo_id, InstanceType.resolve(&sem, s_id).?);
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, &owner_map, s_id).?);
 }
 
 test "same-file field-access type chain resolves through a nested container" {
@@ -67,10 +74,13 @@ test "same-file field-access type chain resolves through a nested container" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const inner_id = sem.symbols.getSymbolNamed("Inner").?;
     const s_id = sem.symbols.getSymbolNamed("s").?;
 
-    try t.expectEqual(inner_id, InstanceType.resolve(&sem, s_id).?);
+    try t.expectEqual(inner_id, InstanceType.resolve(&sem, &owner_map, s_id).?);
 }
 
 test "a variable with no statically-named type resolves to null" {
@@ -84,8 +94,11 @@ test "a variable with no statically-named type resolves to null" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const s_id = sem.symbols.getSymbolNamed("s").?;
-    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, s_id));
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, s_id));
 }
 
 test "crossFileRoot finds the base and field of a single field-access type annotation" {
@@ -133,10 +146,13 @@ test "a pointer-typed self parameter resolves to its declared type's symbol" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
     const self_id = sem.symbols.getSymbolNamed("self").?;
 
-    try t.expectEqual(foo_id, InstanceType.resolve(&sem, self_id).?);
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, &owner_map, self_id).?);
 }
 
 test "a by-value typed parameter resolves to its declared type's symbol" {
@@ -148,10 +164,13 @@ test "a by-value typed parameter resolves to its declared type's symbol" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
     const self_id = sem.symbols.getSymbolNamed("self").?;
 
-    try t.expectEqual(foo_id, InstanceType.resolve(&sem, self_id).?);
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, &owner_map, self_id).?);
 }
 
 test "crossFileRoot finds the base and field of a field-access-typed parameter" {
@@ -176,8 +195,11 @@ test "a parameter with no statically-named type resolves to null" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const x_id = sem.symbols.getSymbolNamed("x").?;
-    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, x_id));
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, x_id));
 }
 
 test "a non-variable symbol resolves to null" {
@@ -187,6 +209,9 @@ test "a non-variable symbol resolves to null" {
     );
     defer sem.deinit();
 
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
     const foo_id = sem.symbols.getSymbolNamed("Foo").?;
-    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, foo_id));
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, foo_id));
 }

@@ -16,7 +16,9 @@
 //! the chain is resolved against; for a cross-file access these differ
 //! after the first hop crosses the `@import` boundary, but every hop after
 //! that stays within the target file, so one `symbols` suffices per call.
-//! Same-file callers pass the same `Semantic` for both.
+//! Same-file callers pass the same `Semantic` for both. `owner_map` is
+//! `symbols`' own `OwnerMap`, used to unwrap a `const Self = @This();`
+//! declared inside a nested container (see `findExport`).
 //!
 //! Phase 13: `resolveChain` interleaves this with Phase 9's `DynamicField`,
 //! so a chain can freely mix static `.field` hops and `@field(...)` hops —
@@ -28,6 +30,7 @@ const std = @import("std");
 const zlint = @import("zlint");
 const Semantic = zlint.Semantic;
 const DynamicField = @import("DynamicField.zig");
+const OwnerMap = @import("OwnerMap.zig");
 
 /// How confidently a `resolveChain` hop was resolved: `.definite` for a
 /// static `.field` hop, `.possible` once a comptime-known `@field(...)` hop
@@ -60,11 +63,11 @@ pub const ChainWalk = struct {
 /// at the first hop that resolves to nothing or to every export of a
 /// container (a runtime-named `@field`, returned via `.unknown` instead of
 /// being chased further — it names a set of targets, not one).
-pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, start: Semantic.Symbol.Id, start_node: Semantic.Ast.Node.Index, start_kind: Kind) ChainWalk {
+pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *const OwnerMap, start: Semantic.Symbol.Id, start_node: Semantic.Ast.Node.Index, start_kind: Kind) ChainWalk {
     var current: ChainResult = .{ .symbol = start, .node = start_node, .kind = start_kind };
     while (true) {
         if (fieldAccessName(ast, current.node)) |name| {
-            const next = findExport(symbols, current.symbol, name) orelse break;
+            const next = findExport(symbols, owner_map, current.symbol, name) orelse break;
             current = .{ .symbol = next, .node = ast.node_links.getParent(current.node).?, .kind = current.kind };
             continue;
         }
@@ -101,28 +104,35 @@ pub fn fieldAccessName(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?[]c
 const FILE_ROOT_SYMBOL: Semantic.Symbol.Id = @enumFromInt(0);
 
 /// A symbol directly exported by `container` (ZLint's `Symbol.exports`)
-/// named `name`, if any. `container` is resolved through a top-level `const
-/// X = @This();` alias first (see `thisAliasRoot`) — the common
-/// `Self`/`<TypeName>` idiom for a file's own type naming itself, which
-/// otherwise dead-ends every container lookup that lands on it, since the
-/// alias is a plain `const`, not a container, and so has no exports of its
-/// own.
-pub fn findExport(symbols: *const Semantic, container: Semantic.Symbol.Id, name: []const u8) ?Semantic.Symbol.Id {
-    const resolved = thisAliasRoot(symbols, container) orelse container;
+/// named `name`, if any. `container` is resolved through a `const X =
+/// @This();` alias first (see `thisAliasRoot`) — the common
+/// `Self`/`<TypeName>` idiom for a container naming itself, which otherwise
+/// dead-ends every container lookup that lands on it, since the alias is a
+/// plain `const`, not a container, and so has no exports of its own.
+/// `owner_map` is `symbols`' own `OwnerMap`, needed to find the true
+/// enclosing container of a *nested* such alias.
+pub fn findExport(symbols: *const Semantic, owner_map: *const OwnerMap, container: Semantic.Symbol.Id, name: []const u8) ?Semantic.Symbol.Id {
+    const resolved = thisAliasRoot(symbols, owner_map, container) orelse container;
     for (symbols.symbols.getExports(resolved).items) |id| {
         if (std.mem.eql(u8, symbols.symbols.get(id).name, name)) return id;
     }
     return null;
 }
 
-/// If `container` is a top-level `const X = @This();` alias, the file's own
-/// root symbol (`@This()` at file scope names the file's container itself).
-/// Checked by asking whether `container` is itself one of `FILE_ROOT_SYMBOL`'s
-/// own exports, rather than walking up parents (this module has no
-/// `OwnerMap`) — which also means a *nested* `const Self = @This();` inside
-/// an inner struct isn't resolved here; only the file-top-level case is.
-/// `null` if `container` isn't such an alias.
-fn thisAliasRoot(symbols: *const Semantic, container: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+/// If `container` is a `const X = @This();` alias, the symbol of the
+/// container it's declared directly inside (`@This()` names the innermost
+/// enclosing container type). For a nested alias (`OwnerMap.get` on its
+/// declaration node lands on some other container symbol — a struct/enum/
+/// union/error set, whose own declaration node *is* its container node,
+/// which is exactly what a nested alias's parent chain hits first), that
+/// owner is the answer directly. For a file-top-level alias, `OwnerMap`
+/// finds no owner (the file root's declaration node is never registered as
+/// anyone's containing declaration), so it falls back to checking whether
+/// `container` is one of `FILE_ROOT_SYMBOL`'s own exports. `null` if
+/// `container` isn't such an alias, or its owner isn't actually a
+/// container (e.g. the alias is declared inside a function, not a
+/// container, directly).
+fn thisAliasRoot(symbols: *const Semantic, owner_map: *const OwnerMap, container: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const symbol = symbols.symbols.get(container);
     if (!symbol.flags.s_variable) return null;
 
@@ -134,6 +144,11 @@ fn thisAliasRoot(symbols: *const Semantic, container: Semantic.Symbol.Id) ?Seman
         else => return null,
     }
     if (!std.mem.eql(u8, symbols.tokenSlice(ast.nodeMainToken(init_node)), "@This")) return null;
+
+    if (owner_map.get(symbol.decl)) |owner| {
+        const owner_symbol = symbols.symbols.get(owner);
+        return if (owner_symbol.flags.intersects(Semantic.Symbol.Flags.s_container)) owner else null;
+    }
 
     for (symbols.symbols.getExports(FILE_ROOT_SYMBOL).items) |id| {
         if (id == container) return FILE_ROOT_SYMBOL;

@@ -100,7 +100,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
 
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
-            const instance_ty = InstanceType.resolve(semantic, sym_id);
+            const instance_ty = InstanceType.resolve(semantic, &f.owner_map, sym_id);
             const cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, sym_id) else null;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
@@ -109,7 +109,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
 
                 try roots.add(gpa, .{ .file = f.id, .local = sym_id }, .@"test");
 
-                const chain = FieldChain.resolveChain(semantic, semantic, sym_id, ref.node, .definite);
+                const chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, sym_id, ref.node, .definite);
                 if (chain.result.symbol != sym_id) {
                     try roots.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, .@"test");
                 }
@@ -118,7 +118,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
                 };
 
                 if (instance_ty) |ty| {
-                    const inst_chain = FieldChain.resolveChain(semantic, semantic, ty, ref.node, .possible);
+                    const inst_chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, ty, ref.node, .possible);
                     if (inst_chain.result.symbol != ty) {
                         try roots.add(gpa, .{ .file = f.id, .local = inst_chain.result.symbol }, .@"test");
                     }
@@ -128,8 +128,8 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
                 }
 
                 if (cross_instance) |cross| {
-                    const target_semantic = &project.file(cross.file).semantic;
-                    const inst_chain = FieldChain.resolveChain(semantic, target_semantic, cross.symbol, ref.node, .possible);
+                    const target_file = project.file(cross.file);
+                    const inst_chain = FieldChain.resolveChain(semantic, &target_file.semantic, &target_file.owner_map, cross.symbol, ref.node, .possible);
                     if (inst_chain.result.symbol != cross.symbol) {
                         try roots.add(gpa, .{ .file = cross.file, .local = inst_chain.result.symbol }, .@"test");
                     }
@@ -156,10 +156,10 @@ const CrossInstanceType = struct { file: FileId, symbol: Semantic.Symbol.Id };
 /// edges from it.
 fn crossInstanceType(project: *const Project, file_id: FileId, semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossInstanceType {
     const root = InstanceType.crossFileRoot(semantic, sym_id) orelse return null;
-    const target_file = importTarget(project, file_id, root.base) orelse return null;
-    const target_semantic = &project.file(target_file).semantic;
-    const ty = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, root.field) orelse return null;
-    return .{ .file = target_file, .symbol = ty };
+    const target_file_id = importTarget(project, file_id, root.base) orelse return null;
+    const target_file = project.file(target_file_id);
+    const ty = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, root.field) orelse return null;
+    return .{ .file = target_file_id, .symbol = ty };
 }
 
 /// The target file of one of `file_id`'s `@import` edges whose binding

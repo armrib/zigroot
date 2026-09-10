@@ -107,7 +107,7 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
 
     var sym_it = semantic.symbols.iter();
     while (sym_it.next()) |sym_id| {
-        const instance_ty = InstanceType.resolve(semantic, sym_id);
+        const instance_ty = InstanceType.resolve(semantic, owner_map, sym_id);
 
         var ref_it = semantic.symbols.iterReferences(sym_id);
         while (ref_it.next()) |ref| {
@@ -115,7 +115,7 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             const owner_id: SymbolId = .{ .file = file, .local = owner };
             try graph.addEdge(gpa, owner_id, .{ .file = file, .local = sym_id }, ref.node, .definite);
 
-            const chain = FieldChain.resolveChain(semantic, semantic, sym_id, ref.node, .definite);
+            const chain = FieldChain.resolveChain(semantic, semantic, owner_map, sym_id, ref.node, .definite);
             if (chain.result.symbol != sym_id) {
                 const kind: EdgeKind = switch (chain.result.kind) {
                     .definite => .definite,
@@ -128,7 +128,7 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
             };
 
             if (instance_ty) |ty| {
-                const inst_chain = FieldChain.resolveChain(semantic, semantic, ty, ref.node, .possible);
+                const inst_chain = FieldChain.resolveChain(semantic, semantic, owner_map, ty, ref.node, .possible);
                 if (inst_chain.result.symbol != ty) {
                     try graph.addEdge(gpa, owner_id, .{ .file = file, .local = inst_chain.result.symbol }, inst_chain.result.node, .possible);
                 }

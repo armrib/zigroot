@@ -62,6 +62,7 @@ const SymbolGraph = @import("SymbolGraph.zig");
 const FieldChain = @import("FieldChain.zig");
 const DynamicField = @import("DynamicField.zig");
 const InstanceType = @import("InstanceType.zig");
+const OwnerMap = @import("OwnerMap.zig");
 
 /// Every file's top-level declarations are exported from this symbol.
 /// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
@@ -79,7 +80,8 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     for (project.import_graph.edges.items) |import_edge| {
         const from_file = project.file(import_edge.from);
         const binding = from_file.owner_map.get(import_edge.node) orelse continue;
-        const target_semantic = &project.file(import_edge.to).semantic;
+        const target_file = project.file(import_edge.to);
+        const target_semantic = &target_file.semantic;
 
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
@@ -87,16 +89,16 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
             const owner_id: SymbolId = .{ .file = import_edge.from, .local = owner };
 
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
-                const target_local = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, field_name) orelse continue;
+                const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, field_name) orelse continue;
                 const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-                try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, target_local, field_node, .definite);
+                try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
                 continue;
             }
 
             if (DynamicField.resolve(&from_file.semantic, target_semantic, FILE_ROOT_SYMBOL, ref.node)) |resolution| switch (resolution) {
                 .possible => |target| {
                     const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-                    try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, target, field_node, .possible);
+                    try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
                 },
                 .unknown => |exports| for (exports) |target| {
                     try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .unknown);
@@ -130,18 +132,19 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
 
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
-            if (InstanceType.resolve(semantic, sym_id) != null) continue;
+            if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
             const root = InstanceType.crossFileRoot(semantic, sym_id) orelse continue;
 
-            const target_file = importTarget(project, file.id, root.base) orelse continue;
-            const target_semantic = &project.file(target_file).semantic;
-            const ty = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, root.field) orelse continue;
+            const target_file_id = importTarget(project, file.id, root.base) orelse continue;
+            const target_file = project.file(target_file_id);
+            const target_semantic = &target_file.semantic;
+            const ty = FieldChain.findExport(target_semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, root.field) orelse continue;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
                 const owner = file.owner_map.get(ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
-                try addChain(graph, gpa, owner_id, target_file, semantic, target_semantic, ty, ref.node, .possible);
+                try addChain(graph, gpa, owner_id, target_file_id, semantic, target_semantic, &target_file.owner_map, ty, ref.node, .possible);
             }
         }
     }
@@ -179,7 +182,7 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
 
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
-            if (InstanceType.resolve(semantic, sym_id) != null) continue;
+            if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
             if (InstanceType.crossFileRoot(semantic, sym_id) != null) continue;
             const fn_expr = InstanceType.callInit(semantic, sym_id) orelse continue;
 
@@ -197,13 +200,14 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
             }
 
             const ty = resolveValueChain(project, fn_sym.file, return_node) orelse continue;
-            const ty_semantic = &project.file(ty.file).semantic;
+            const ty_file = project.file(ty.file);
+            const ty_semantic = &ty_file.semantic;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
                 const owner = file.owner_map.get(ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
-                try addChain(graph, gpa, owner_id, ty.file, semantic, ty_semantic, ty.local, ref.node, .possible);
+                try addChain(graph, gpa, owner_id, ty.file, semantic, ty_semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
             }
         }
     }
@@ -237,15 +241,15 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
 /// might be), then — if `base` is itself bound to an `@import` (a
 /// re-export) — against the target file's exports instead.
 fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
-    const base_semantic = &project.file(base.file).semantic;
-    if (FieldChain.findExport(base_semantic, base.local, field)) |found| {
+    const base_file = project.file(base.file);
+    if (FieldChain.findExport(&base_file.semantic, &base_file.owner_map, base.local, field)) |found| {
         return .{ .file = base.file, .local = found };
     }
 
-    const target_file = importTarget(project, base.file, base.local) orelse return null;
-    const target_semantic = &project.file(target_file).semantic;
-    const found = FieldChain.findExport(target_semantic, FILE_ROOT_SYMBOL, field) orelse return null;
-    return .{ .file = target_file, .local = found };
+    const target_file_id = importTarget(project, base.file, base.local) orelse return null;
+    const target_file = project.file(target_file_id);
+    const found = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, field) orelse return null;
+    return .{ .file = target_file_id, .local = found };
 }
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
@@ -260,11 +264,12 @@ fn addChain(
     target_file: FileId,
     ast: *const Semantic,
     symbols: *const Semantic,
+    owner_map: *const OwnerMap,
     start: Semantic.Symbol.Id,
     start_node: Semantic.Ast.Node.Index,
     start_kind: FieldChain.Kind,
 ) !void {
-    const chain = FieldChain.resolveChain(ast, symbols, start, start_node, start_kind);
+    const chain = FieldChain.resolveChain(ast, symbols, owner_map, start, start_node, start_kind);
     const kind: SymbolGraph.EdgeKind = switch (chain.result.kind) {
         .definite => .definite,
         .possible => .possible,
