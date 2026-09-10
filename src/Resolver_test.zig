@@ -250,6 +250,104 @@ test "a symbol only reachable via a generic type-returning function's init is no
     try t.expect(!reachability.isReachable(.{ .file = walk_id, .local = unused_sym }));
 }
 
+test "a catch-wrapped call initializer chains an instance method the same as try" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    const w = storage.Widget.make(1) catch return;
+        \\    w.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub const Widget = struct {
+        \\    pub fn make(id: u8) !Widget { _ = id; return .{}; }
+        \\    pub fn run(self: *Widget) void { _ = self; }
+        \\    pub fn unused(self: *Widget) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const storage_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
+    } else unreachable;
+    const storage_semantic = &project.file(storage_id).semantic;
+    const run_sym = storage_semantic.symbols.getSymbolNamed("run").?;
+    const unused_sym = storage_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = storage_id, .local = run_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
+}
+
+test "an orelse-wrapped call initializer to an optional-returning function chains an instance method" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    const w = storage.Widget.find(1) orelse return;
+        \\    w.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub const Widget = struct {
+        \\    pub fn find(id: u8) ?Widget { _ = id; return .{}; }
+        \\    pub fn run(self: *Widget) void { _ = self; }
+        \\    pub fn unused(self: *Widget) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const storage_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
+    } else unreachable;
+    const storage_semantic = &project.file(storage_id).semantic;
+    const run_sym = storage_semantic.symbols.getSymbolNamed("run").?;
+    const unused_sym = storage_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = storage_id, .local = run_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
+}
+
 test "@field(storage, \"start\") produces a cross-file .possible edge" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

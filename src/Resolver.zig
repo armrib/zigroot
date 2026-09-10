@@ -266,9 +266,9 @@ fn importTargetRoot(project: *const Project, file_id: FileId, base: Semantic.Sym
 /// annotation/struct-literal shapes (`InstanceType.resolve` — same-file —
 /// or `InstanceType.crossFileRoot` — one cross-file hop): resolve the
 /// callee to a function symbol, read that function's own declared return
-/// type (unwrapping one `!error_union` payload), resolve that expression
-/// too, then chain the variable's own references into it the same way
-/// `buildInstanceTypes` does once its type is known.
+/// type (unwrapping one `!error_union` and/or `?optional_type` layer),
+/// resolve that expression too, then chain the variable's own references
+/// into it the same way `buildInstanceTypes` does once its type is known.
 ///
 /// Phase 19: a generic type-returning function (`fn Walker(comptime V: type)
 /// type { return struct { ... }; }`) declares its return type as the bare
@@ -328,6 +328,9 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
     var return_node = proto.ast.return_type.unwrap() orelse return null;
     if (fn_ast.nodeTag(return_node) == .error_union) {
         return_node = fn_ast.nodeData(return_node).node_and_node[1];
+    }
+    if (fn_ast.nodeTag(return_node) == .optional_type) {
+        return_node = fn_ast.nodeData(return_node).node;
     }
 
     if (isTypeKeyword(fn_semantic, return_node)) {

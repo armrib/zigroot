@@ -375,7 +375,9 @@ fn fieldAccessRoot(semantic: *const Semantic, owner_map: *const OwnerMap, node: 
 /// already has an explicit type annotation (`resolve` covers that), or its
 /// initializer isn't a call. A leading `try` (`var s = try Foo.init(...)`,
 /// the common shape for a fallible `init`) is unwrapped first — it's not
-/// part of the call expression itself.
+/// part of the call expression itself. So is a wrapping `catch`/`orelse`
+/// (`var s = Foo.make(id) catch return;` / `Foo.find(id) orelse return`) —
+/// both are `node_and_node`, with the wrapped call in `data[0]`.
 pub fn callInit(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node.Index {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_variable) return null;
@@ -385,7 +387,11 @@ pub fn callInit(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node
     if (decl.ast.type_node.unwrap() != null) return null;
 
     var init_node = decl.ast.init_node.unwrap() orelse return null;
-    if (ast.nodeTag(init_node) == .@"try") init_node = ast.nodeData(init_node).node;
+    switch (ast.nodeTag(init_node)) {
+        .@"try" => init_node = ast.nodeData(init_node).node,
+        .@"catch", .@"orelse" => init_node = ast.nodeData(init_node).node_and_node[0],
+        else => {},
+    }
 
     var buf: [1]Ast.Node.Index = undefined;
     const call = ast.fullCall(&buf, init_node) orelse return null;
