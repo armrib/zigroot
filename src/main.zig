@@ -112,7 +112,7 @@ pub fn main() !u8 {
 
     std.debug.print("loaded {d} file(s) reachable from {d} root(s)\n", .{
         project.files.items.len,
-        opts.roots.items.len,
+        project.roots.items.len,
     });
 
     if (project.import_graph.unresolved.items.len > 0) {
