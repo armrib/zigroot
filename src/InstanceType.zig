@@ -70,6 +70,7 @@ pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Se
     if (optionalPayloadSource(semantic, owner_map, sym_id)) |source| {
         return resolve(semantic, owner_map, source);
     }
+    if (addressOfChainTarget(semantic, owner_map, sym_id)) |target| return target;
     const candidates = declaredTypeNodes(semantic, sym_id);
     for (candidates.slice()) |type_node| {
         if (resolveTypeExpr(semantic, owner_map, type_node)) |ty| return ty;
@@ -197,6 +198,43 @@ fn optionalPayloadSource(semantic: *const Semantic, owner_map: *const OwnerMap, 
     const base_sym = referenceAt(semantic, base_node) orelse return null;
 
     const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+    return chain.result.symbol;
+}
+
+/// If `sym_id` is a variable with no explicit type annotation, declared as
+/// `const c = &expr;` where `expr` is a same-file chain of `.field` and
+/// `[index]` hops off an identifier (e.g. `&h.arr[1]`), the symbol that
+/// chain resolves to — reusing `FieldChain.resolveChain`'s `array_access`
+/// handling so `c` picks up the *element* type an indexed hop lands on,
+/// the same way an explicit type annotation would. `null` if `sym_id` isn't
+/// such a variable, its initializer isn't an `address_of`, or the chain
+/// doesn't resolve same-file (e.g. it's stuck on an `@import` boundary or a
+/// runtime-named `@field`).
+fn addressOfChainTarget(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    if (ast.nodeTag(init_node) != .address_of) return null;
+    const expr_node = ast.nodeData(init_node).node;
+
+    var base_node = expr_node;
+    while (true) {
+        switch (ast.nodeTag(base_node)) {
+            .field_access => base_node = ast.nodeData(base_node).node_and_token[0],
+            .array_access => base_node = ast.nodeData(base_node).node_and_node[0],
+            else => break,
+        }
+    }
+    if (base_node == expr_node) return null;
+    const base_sym = referenceAt(semantic, base_node) orelse return null;
+
+    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+    if (chain.unknown != null or chain.stuck != null) return null;
     return chain.result.symbol;
 }
 

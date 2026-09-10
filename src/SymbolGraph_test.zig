@@ -399,3 +399,103 @@ test "an instance method reached through a struct field edges to the method" {
     }
     try t.expect(reaches_helper);
 }
+
+test "an instance method reached through an indexed array-field element edges to the method" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn helper(self: *Foo) void { _ = self; }
+        \\};
+        \\const Holder = struct {
+        \\    arr: [4]Foo,
+        \\};
+        \\fn a() void {
+        \\    var h: Holder = undefined;
+        \\    h.arr[0].helper();
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const helper_id = sem.symbols.getSymbolNamed("helper").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var reaches_helper = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = helper_id })) reaches_helper = true;
+    }
+    try t.expect(reaches_helper);
+}
+
+test "an instance method reached through a &-taken indexed array-field element edges to the method" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn helper(self: *Foo) void { _ = self; }
+        \\};
+        \\const Holder = struct {
+        \\    arr: [4]Foo,
+        \\};
+        \\fn a() void {
+        \\    var h: Holder = undefined;
+        \\    const c = &h.arr[1];
+        \\    c.helper();
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const helper_id = sem.symbols.getSymbolNamed("helper").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var reaches_helper = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = helper_id })) reaches_helper = true;
+    }
+    try t.expect(reaches_helper);
+}
+
+test "an instance method reached through an indexed local array edges to the method" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn helper(self: *Foo) void { _ = self; }
+        \\};
+        \\fn a() void {
+        \\    var la: [2]Foo = undefined;
+        \\    la[0].helper();
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const helper_id = sem.symbols.getSymbolNamed("helper").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = a_id });
+    var reaches_helper = false;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = helper_id })) reaches_helper = true;
+    }
+    try t.expect(reaches_helper);
+}

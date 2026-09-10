@@ -108,6 +108,13 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
             break;
         }
 
+        if (type_resolved != null) {
+            if (arrayAccessNode(ast, current.node)) |access_node| {
+                current = .{ .symbol = container, .node = access_node, .kind = hop_kind };
+                continue;
+            }
+        }
+
         if (DynamicField.resolve(ast, symbols, container, current.node)) |resolution| switch (resolution) {
             .possible => |target| {
                 current = .{ .symbol = target, .node = ast.node_links.getParent(current.node).?, .kind = .possible };
@@ -132,6 +139,19 @@ pub fn fieldAccessName(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?[]c
     const data = ast.parse.ast.nodeData(parent).node_and_token;
     if (data[0] != node) return null;
     return ast.tokenSlice(data[1]);
+}
+
+/// If `node` is used as the indexed operand of an array/slice access
+/// (`node[i]`), the `array_access` node itself — the element type, once
+/// resolved, is already unwrapped onto it so a further `.field` hop off it
+/// resolves against the element rather than the array/slice. `null` if
+/// `node` isn't an array-access operand.
+pub fn arrayAccessNode(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    const parent = ast.node_links.getParent(node) orelse return null;
+    if (ast.parse.ast.nodeTag(parent) != .array_access) return null;
+    const data = ast.parse.ast.nodeData(parent).node_and_node;
+    if (data[0] != node) return null;
+    return parent;
 }
 
 /// Every file's top-level declarations are exported from this symbol.
