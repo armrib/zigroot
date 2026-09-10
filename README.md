@@ -93,11 +93,11 @@ against a real codebase. See `issues/` for the full list.
 
 ## Build
 
-Requires Zig 0.15.x (ZLint is vendored at a pre-0.16 commit; see
-"Zig version" below).
+Requires Zig 0.15.x (ZLint is a package dependency pinned to a pre-0.16
+commit; see "Zig version" below).
 
 ```sh
-zig build --fetch   # first time only, fetches ZLint's own deps
+zig build --fetch   # first time only, fetches ZLint (and its own deps)
 zig build test
 zig build
 ```
@@ -141,14 +141,16 @@ src/
     Scc.zig                   Tarjan SCC over the declaration graph
     BuildGraph.zig            build.zig module-name -> file resolution
   main.zig                    CLI
-vendor/zlint/                 git submodule, pinned to a pre-0.16 commit
 ```
+
+ZLint itself is a `zig fetch`-managed package dependency (see
+`build.zig.zon`), not vendored in this tree.
 
 ## Zig version
 
 ZLint's `main` branch moved to Zig 0.16's `Io`-threaded filesystem API
 (`Dir.readFile(dir, io, ...)`, etc.). To keep this scaffold on the more
-stable classic `std.fs` API, `vendor/zlint` is pinned to
+stable classic `std.fs` API, `build.zig.zon` pins the `zlint` dependency to
 [`8cbbb1c`](https://github.com/DonIsaac/zlint/commit/8cbbb1c9c48ebc091d9b230bb98355d53cc251ad),
 the last commit before that migration (targets Zig 0.15.x). Re-evaluate
 this pin before adding new ZLint-derived code.
