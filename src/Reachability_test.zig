@@ -225,6 +225,54 @@ test "extern declarations are never reported dead" {
     }
 }
 
+test "locals and parameters of a dead function roll up into one finding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn dead_fn(x: i32, y: i32) void {
+        \\    const total = x + y;
+        \\    _ = total;
+        \\}
+        \\pub fn main() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const dead_fn = semantic.symbols.getSymbolNamed("dead_fn").?;
+    const x = semantic.symbols.getSymbolNamed("x").?;
+    const y = semantic.symbols.getSymbolNamed("y").?;
+    const total = semantic.symbols.getSymbolNamed("total").?;
+
+    var found_parent: ?usize = null;
+    for (dead.items) |d| {
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = x }));
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = y }));
+        try t.expect(!d.id.eql(.{ .file = file_id, .local = total }));
+        if (d.id.eql(.{ .file = file_id, .local = dead_fn })) found_parent = d.nested;
+    }
+    try t.expectEqual(@as(?usize, 3), found_parent);
+}
+
 test "a symbol only referenced from a test block is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

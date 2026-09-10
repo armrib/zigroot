@@ -102,10 +102,22 @@ fn collectUnknown(self: *Reachability, gpa: Allocator, graph: *const SymbolGraph
 /// Skips `extern` declarations (Phase 8): their implementation lives
 /// outside the project, so local reachability alone can never justify
 /// calling them dead.
+///
+/// A dead declaration whose owner (per `OwnerMap`) is itself dead is
+/// suppressed here: everything nested inside a dead parent (locals,
+/// parameters, enum members, a self-referencing closure) is dead for the
+/// same reason its parent is, and reporting each separately turns one
+/// actionable finding into a dozen. Only the outermost dead declaration in
+/// such a chain is returned, with `nested` counting how many descendants
+/// were folded into it.
+///
 /// Caller owns the returned list.
 pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Project) Allocator.Error!std.ArrayListUnmanaged(Dead) {
-    var dead: std.ArrayListUnmanaged(Dead) = .empty;
-    errdefer dead.deinit(gpa);
+    var all: std.ArrayListUnmanaged(SymbolId) = .empty;
+    defer all.deinit(gpa);
+
+    var dead_ids: std.AutoHashMapUnmanaged(SymbolId, void) = .empty;
+    defer dead_ids.deinit(gpa);
 
     for (project.files.items) |f| {
         var it = f.semantic.symbols.iter();
@@ -113,14 +125,61 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
             if (f.semantic.symbols.get(local).flags.s_extern) continue;
             const id: SymbolId = .{ .file = f.id, .local = local };
             if (self.isReachable(id)) continue;
-            try dead.append(gpa, .{ .id = id, .possible = self.isPossiblyReachable(id) });
+            try dead_ids.put(gpa, id, {});
+            try all.append(gpa, id);
         }
+    }
+
+    var nested_count: std.AutoHashMapUnmanaged(SymbolId, usize) = .empty;
+    defer nested_count.deinit(gpa);
+
+    for (all.items) |id| {
+        const outermost = outermostDead(project, &dead_ids, id);
+        if (outermost.eql(id)) continue;
+        const gop = try nested_count.getOrPut(gpa, outermost);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+
+    var dead: std.ArrayListUnmanaged(Dead) = .empty;
+    errdefer dead.deinit(gpa);
+
+    for (all.items) |id| {
+        if (!outermostDead(project, &dead_ids, id).eql(id)) continue;
+        try dead.append(gpa, .{
+            .id = id,
+            .possible = self.isPossiblyReachable(id),
+            .nested = nested_count.get(id) orelse 0,
+        });
     }
 
     return dead;
 }
 
+/// The declaration `id`'s owner (per `OwnerMap`), or `null` if `id` isn't
+/// nested inside another declaration.
+fn ownerOf(project: *const Project, id: SymbolId) ?SymbolId {
+    const f = project.file(id.file);
+    const sym = f.semantic.symbols.get(id.local);
+    const owner_local = f.owner_map.get(sym.decl) orelse return null;
+    return .{ .file = id.file, .local = owner_local };
+}
+
+/// Walks `id`'s owner chain as far as it stays inside `dead_ids`, returning
+/// the topmost dead ancestor (or `id` itself if its owner isn't dead).
+fn outermostDead(project: *const Project, dead_ids: *const std.AutoHashMapUnmanaged(SymbolId, void), id: SymbolId) SymbolId {
+    var outermost = id;
+    while (ownerOf(project, outermost)) |owner| {
+        if (!dead_ids.contains(owner)) break;
+        outermost = owner;
+    }
+    return outermost;
+}
+
 pub const Dead = struct {
     id: SymbolId,
     possible: bool,
+    /// Count of dead descendants (nested locals, parameters, enum members,
+    /// etc.) folded into this finding rather than reported separately.
+    nested: usize = 0,
 };

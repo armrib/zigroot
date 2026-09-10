@@ -190,11 +190,10 @@ pub fn main() !u8 {
 
         if (reported == 0) std.debug.print("\ndead declaration(s) (unreachable from any root):\n", .{});
         reported += 1;
-        std.debug.print("  {s}: {s}{s}\n", .{
-            project.file(d.id.file).path,
-            name,
-            if (d.possible) " (possible: only reached via an unresolved dynamic access)" else "",
-        });
+        std.debug.print("  {s}: {s}", .{ project.file(d.id.file).path, name });
+        if (d.nested > 0) std.debug.print(" (+{d} nested)", .{d.nested});
+        if (d.possible) std.debug.print(" (possible: only reached via an unresolved dynamic access)", .{});
+        std.debug.print("\n", .{});
     }
 
     if (reported > 0) {
