@@ -3,19 +3,19 @@
 
 pub const zlint = @import("zlint");
 
-pub const FileId = @import("project/FileId.zig").FileId;
-pub const File = @import("project/File.zig");
-pub const ImportGraph = @import("project/ImportGraph.zig");
-pub const OwnerMap = @import("project/OwnerMap.zig");
-pub const SymbolGraph = @import("project/SymbolGraph.zig");
-pub const SymbolId = @import("project/SymbolId.zig").SymbolId;
-pub const Roots = @import("project/Roots.zig");
-pub const Reachability = @import("project/Reachability.zig");
-pub const Resolver = @import("project/Resolver.zig");
-pub const DynamicField = @import("project/DynamicField.zig");
-pub const InstanceType = @import("project/InstanceType.zig");
-pub const Scc = @import("project/Scc.zig");
-pub const BuildGraph = @import("project/BuildGraph.zig");
+pub const FileId = @import("FileId.zig").FileId;
+pub const File = @import("File.zig");
+pub const ImportGraph = @import("ImportGraph.zig");
+pub const OwnerMap = @import("OwnerMap.zig");
+pub const SymbolGraph = @import("SymbolGraph.zig");
+pub const SymbolId = @import("SymbolId.zig").SymbolId;
+pub const Roots = @import("Roots.zig");
+pub const Reachability = @import("Reachability.zig");
+pub const Resolver = @import("Resolver.zig");
+pub const DynamicField = @import("DynamicField.zig");
+pub const InstanceType = @import("InstanceType.zig");
+pub const Scc = @import("Scc.zig");
+pub const BuildGraph = @import("BuildGraph.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -23,13 +23,13 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("semantic_reuse_test.zig");
     _ = @import("Project_test.zig");
-    _ = @import("project/OwnerMap_test.zig");
-    _ = @import("project/SymbolGraph_test.zig");
-    _ = @import("project/Roots_test.zig");
-    _ = @import("project/Reachability_test.zig");
-    _ = @import("project/Resolver_test.zig");
-    _ = @import("project/DynamicField_test.zig");
-    _ = @import("project/InstanceType_test.zig");
-    _ = @import("project/Scc_test.zig");
-    _ = @import("project/BuildGraph_test.zig");
+    _ = @import("OwnerMap_test.zig");
+    _ = @import("SymbolGraph_test.zig");
+    _ = @import("Roots_test.zig");
+    _ = @import("Reachability_test.zig");
+    _ = @import("Resolver_test.zig");
+    _ = @import("DynamicField_test.zig");
+    _ = @import("InstanceType_test.zig");
+    _ = @import("Scc_test.zig");
+    _ = @import("BuildGraph_test.zig");
 }

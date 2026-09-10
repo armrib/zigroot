@@ -12,11 +12,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zlint = @import("zlint");
 
-const FileId = @import("project/FileId.zig").FileId;
-const File = @import("project/File.zig");
-const ImportGraph = @import("project/ImportGraph.zig");
-const SymbolId = @import("project/SymbolId.zig").SymbolId;
-const BuildGraph = @import("project/BuildGraph.zig");
+const FileId = @import("FileId.zig").FileId;
+const File = @import("File.zig");
+const ImportGraph = @import("ImportGraph.zig");
+const SymbolId = @import("SymbolId.zig").SymbolId;
+const BuildGraph = @import("BuildGraph.zig");
 
 const Project = @This();
 

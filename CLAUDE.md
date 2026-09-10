@@ -14,7 +14,7 @@ found. It reports orphan files (`.zig` files no root reaches) and dead
 symbols (declarations no root's reachability BFS reaches).
 
 The README's "Status" section and `issues/*.md` are the living design log
-— read them before changing `src/project/*` to understand what's
+— read them before changing `src/*.zig` to understand what's
 implemented, what's an intentional gap, and the likely shape of planned
 fixes. Each `issues/NN-*.md` is a single known gap with a measured/example
 repro and a sketch of the fix. **When a fix lands that closes an issue,
@@ -51,23 +51,23 @@ Exits non-zero if any orphan files are found.
 
 Everything is layered on ZLint's per-file `Semantic`:
 
-- `File` (`src/project/File.zig`) parses one file and owns its ZLint
+- `File` (`src/File.zig`) parses one file and owns its ZLint
   `Semantic`, plus a derived `OwnerMap` and `SymbolGraph` built alongside it.
 - `Project` (`src/Project.zig`) loads root files, follows
   `@import("*.zig")` transitively via `ImportGraph`, and holds all `File`s.
   Any `.zig` file under `--dir` that no root's import graph reaches is an
   orphan file.
-- `SymbolId` (`src/project/SymbolId.zig`) pairs a ZLint `Symbol.Id` with
+- `SymbolId` (`src/SymbolId.zig`) pairs a ZLint `Symbol.Id` with
   its owning `FileId` — the project-wide symbol identity everything else
   is keyed on.
-- `OwnerMap` (`src/project/OwnerMap.zig`) maps every AST node to the
+- `OwnerMap` (`src/OwnerMap.zig`) maps every AST node to the
   declaration (symbol) whose body contains it, derived from ZLint's
   per-node parent links.
-- `SymbolGraph` (`src/project/SymbolGraph.zig`) is the same-file
+- `SymbolGraph` (`src/SymbolGraph.zig`) is the same-file
   `Symbol -> Symbol` reference graph: for every symbol, its already-resolved
   incoming references are mapped through `OwnerMap` to find the referencing
   symbol.
-- `Resolver` (`src/project/Resolver.zig`) extends `SymbolGraph` across
+- `Resolver` (`src/Resolver.zig`) extends `SymbolGraph` across
   `@import` boundaries — e.g. `storage.start()` where `storage` is an
   import binding — by matching member-access references against the
   target file's exported symbols. `FieldChain.zig` and `DynamicField.zig`
@@ -78,22 +78,22 @@ Everything is layered on ZLint's per-file `Semantic`:
   type's symbol so instance-method calls chain the same way static calls
   do. None of this is real type inference — it's reading what's already
   spelled out in the AST.
-- `BuildGraph` (`src/project/BuildGraph.zig`) is a syntactic scan of a
+- `BuildGraph` (`src/BuildGraph.zig`) is a syntactic scan of a
   `build.zig`'s local module graph (`b.createModule` +
   `.addImport("name", ...)`), so named-module imports like
   `@import("storage")` resolve to a file instead of staying unresolved.
   Enabled with `--build-zig <path>`; `b.dependency(...)` modules aren't
   backed by a local file and stay unresolved.
-- `Roots` (`src/project/Roots.zig`) computes automatic reachability roots:
+- `Roots` (`src/Roots.zig`) computes automatic reachability roots:
   each root file's `main`, every `export`ed symbol, every symbol
   referenced from a `test { ... }` block (ZLint gives `test` blocks no
   symbol identity of their own), and — under `--library` — every `pub`
   symbol.
-- `Reachability` (`src/project/Reachability.zig`) is a BFS over
+- `Reachability` (`src/Reachability.zig`) is a BFS over
   `SymbolGraph` + `Resolver`'s cross-file edges starting from `Roots`;
   `deadSymbols` is everything the BFS never reaches. `extern` declarations
   are excluded since their implementation lives outside the project.
-- `Scc` (`src/project/Scc.zig`) runs Tarjan's algorithm over the same
+- `Scc` (`src/Scc.zig`) runs Tarjan's algorithm over the same
   edges `Reachability` trusts, so a cycle of mutually-referencing-but-
   globally-dead declarations is reported as one finding instead of N.
 
@@ -106,7 +106,7 @@ then dead symbols (grouping cyclic components).
 - Tests live beside their subject as `Foo_test.zig` (not inline `test {}`
   blocks in `Foo.zig` itself, except for trivial cases). Every new
   `*_test.zig` file must be added to the `test { ... }` block at the
-  bottom of `src/root.zig` (`_ = @import("project/Foo_test.zig");`) or it
+  bottom of `src/root.zig` (`_ = @import("Foo_test.zig");`) or it
   will never run under `zig build test`.
 - New cross-file resolution logic (anything extending what `Resolver`
   handles) typically needs wiring into the same three call sites that

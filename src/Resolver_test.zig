@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const t = std.testing;
-const Project = @import("../Project.zig");
+const Project = @import("Project.zig");
 const FileId = @import("FileId.zig").FileId;
 const Roots = @import("Roots.zig");
 const Reachability = @import("Reachability.zig");

@@ -11,69 +11,69 @@ Status: Phase 0-16. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
-  `src/project/ImportGraph.zig`).
+  `src/ImportGraph.zig`).
 - Orphan-file detection: any `.zig` file under a scanned directory that no
   configured root reaches via `@import`.
 - Named-module imports (`@import("std")`, `@import("some_dep")`) are
   recorded as unresolved rather than treated as errors — resolving those
   needs `build.zig` module information, which is future work.
 - `SymbolId`: pairs one of ZLint's per-file `Symbol.Id`s with the owning
-  `FileId`, giving a project-wide symbol identity (`src/project/SymbolId.zig`).
+  `FileId`, giving a project-wide symbol identity (`src/SymbolId.zig`).
 - `OwnerMap`: for every AST node in a file, the declaration (symbol) whose
   body contains it, derived from ZLint's per-node parent links
-  (`src/project/OwnerMap.zig`). `File` builds one alongside its `semantic`.
+  (`src/OwnerMap.zig`). `File` builds one alongside its `semantic`.
 - `SymbolGraph`: same-file `Symbol -> Symbol` reference edges, built by
   mapping every symbol's already-resolved incoming references through
-  `OwnerMap` (`src/project/SymbolGraph.zig`). `File` builds one alongside
+  `OwnerMap` (`src/SymbolGraph.zig`). `File` builds one alongside
   its `semantic` and `OwnerMap`.
 - `Roots`: automatic reachability roots — each `--root` file's `main`
   (`executable_entry`), every `export`ed symbol (`.export`), every symbol
   referenced from a `test { ... }` block (`.test`, since ZLint gives `test`
   blocks no symbol identity of their own to make a root out of directly),
   and, under `PublicPolicy.root` (library mode, `--library`), every `pub`
-  symbol (`.public_api`) (`src/project/Roots.zig`).
+  symbol (`.public_api`) (`src/Roots.zig`).
 - `extern` declarations are excluded from `deadSymbols` — their
   implementation lives outside the project, so local reachability can't
-  justify calling them dead (`src/project/Reachability.zig`).
+  justify calling them dead (`src/Reachability.zig`).
 - `Reachability`: BFS over `SymbolGraph` from `Roots`, plus `Resolver`'s
   cross-file edges; `deadSymbols` lists every declared symbol the BFS never
-  reaches (`src/project/Reachability.zig`). The CLI reports these after
+  reaches (`src/Reachability.zig`). The CLI reports these after
   orphan-file detection.
 - `Resolver`: resolves `const storage = @import("storage.zig");
   storage.start();` into a cross-file `SymbolGraph` edge, by matching a
   member-access reference on an import binding against the target file's
-  exported symbols (`src/project/Resolver.zig`).
+  exported symbols (`src/Resolver.zig`).
 - `FieldChain`: resolves `Foo.bar()` and `Outer.Inner.run()` static-member
   chains through ZLint's `Symbol.exports`, both same-file (`SymbolGraph`)
   and across an `@import` boundary (`Resolver`) — no type inference, just
-  container graph traversal (`src/project/FieldChain.zig`).
+  container graph traversal (`src/FieldChain.zig`).
 
 - `Scc`: Tarjan's algorithm over the same edges `Reachability` trusts, so a
   cycle of mutually-referencing-but-globally-dead declarations is reported
-  as one finding instead of N (`src/project/Scc.zig`). The CLI groups a
+  as one finding instead of N (`src/Scc.zig`). The CLI groups a
   dead symbol's whole cyclic component into one `cycle of N
   declaration(s)...` report.
 - `BuildGraph`: a syntactic scan of a `build.zig`'s local module graph
   (`b.createModule(...)` + `.addImport("name", ...)` bindings), so
   named-module imports like `@import("storage")` resolve to their file
-  instead of staying unresolved (`src/project/BuildGraph.zig`). Enabled
+  instead of staying unresolved (`src/BuildGraph.zig`). Enabled
   with `--build-zig <path>`; dependency modules (`b.dependency(...)`) stay
   unresolved, since they aren't backed by a local file.
 - `DynamicField` now also resolves `@field(...)` across an `@import`
   boundary (`@field(storage, "start")`), via the same target-file
   export-matching `Resolver` uses for `storage.start()`
-  (`src/project/DynamicField.zig`, `src/project/Resolver.zig`).
+  (`src/DynamicField.zig`, `src/Resolver.zig`).
 - `FieldChain.resolveChain` interleaves static `.field` hops and
   `@field(...)` hops in one walk, so `@field(Foo, "Bar").baz()` and
   `@field(Outer.Inner, "run")` both resolve as far as they can — instead of
   `@field` being a one-hop dead end — both same-file (`SymbolGraph`) and
-  across an `@import` boundary (`Resolver`) (`src/project/FieldChain.zig`).
+  across an `@import` boundary (`Resolver`) (`src/FieldChain.zig`).
 
 - `InstanceType`: resolves a variable's syntactically-declared type (an
   explicit type annotation or a typed struct-literal initializer) to that
   type's symbol, so `var s: Foo = ...; s.run();` reaches `Foo`'s `run` the
   same way `Foo.run()` does — not real type inference, just reading what's
-  already written down (`src/project/InstanceType.zig`, wired into
+  already written down (`src/InstanceType.zig`, wired into
   `SymbolGraph`). `Resolver` extends this across an `@import` boundary too:
   `var s: storage.Widget = ...; s.run();` resolves `storage.Widget` into the
   target file's exports the same way `storage.foo()` does, then chains `s`'s
@@ -128,21 +128,20 @@ Exits non-zero if any orphan files are found.
 src/
   root.zig                    library entry point, re-exports Project
   Project.zig                 file graph + orphan detection
-  project/
-    FileId.zig
-    File.zig                  one parsed+analyzed file (owns zlint.Semantic + OwnerMap)
-    ImportGraph.zig           file-level @import edges
-    SymbolId.zig              project-wide symbol identity
-    OwnerMap.zig              node -> containing-declaration map
-    SymbolGraph.zig           same-file Symbol -> Symbol reference edges
-    Roots.zig                 automatic reachability roots (main, export, test, pub policy)
-    Reachability.zig          BFS over SymbolGraph + Resolver edges from Roots
-    Resolver.zig              cross-file Symbol -> Symbol edges via @import
-    FieldChain.zig            Foo.bar() / Outer.Inner.run() export-chain resolution
-    DynamicField.zig          @field(Foo, name) resolution (comptime + runtime name)
-    InstanceType.zig          locally-typed variable -> declared-type symbol resolution
-    Scc.zig                   Tarjan SCC over the declaration graph
-    BuildGraph.zig            build.zig module-name -> file resolution
+  FileId.zig
+  File.zig                    one parsed+analyzed file (owns zlint.Semantic + OwnerMap)
+  ImportGraph.zig             file-level @import edges
+  SymbolId.zig                project-wide symbol identity
+  OwnerMap.zig                node -> containing-declaration map
+  SymbolGraph.zig             same-file Symbol -> Symbol reference edges
+  Roots.zig                   automatic reachability roots (main, export, test, pub policy)
+  Reachability.zig            BFS over SymbolGraph + Resolver edges from Roots
+  Resolver.zig                cross-file Symbol -> Symbol edges via @import
+  FieldChain.zig              Foo.bar() / Outer.Inner.run() export-chain resolution
+  DynamicField.zig            @field(Foo, name) resolution (comptime + runtime name)
+  InstanceType.zig            locally-typed variable -> declared-type symbol resolution
+  Scc.zig                     Tarjan SCC over the declaration graph
+  BuildGraph.zig              build.zig module-name -> file resolution
   main.zig                    CLI
 ```
 

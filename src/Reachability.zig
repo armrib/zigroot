@@ -16,7 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Project = @import("../Project.zig");
+const Project = @import("Project.zig");
 const Roots = @import("Roots.zig");
 const SymbolGraph = @import("SymbolGraph.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;

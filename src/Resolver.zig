@@ -55,7 +55,7 @@ const zlint = @import("zlint");
 const Semantic = zlint.Semantic;
 const Ast = Semantic.Ast;
 
-const Project = @import("../Project.zig");
+const Project = @import("Project.zig");
 const FileId = @import("FileId.zig").FileId;
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const SymbolGraph = @import("SymbolGraph.zig");
