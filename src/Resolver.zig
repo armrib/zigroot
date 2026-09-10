@@ -283,6 +283,15 @@ fn importTargetRoot(project: *const Project, file_id: FileId, base: Semantic.Sym
 /// `Walker`'s own enclosing container (usually `walk.zig`'s file root), the
 /// same way `FieldChain.findExport` already resolves a `const Self =
 /// @This();` alias to its container.
+///
+/// Phase 25: `for (seq) |x|` where `seq` is itself one of the above
+/// call-init shapes (`const tail = tailOf(...); for (tail) |*e| { ... }`)
+/// has no type-position node of its own for `InstanceType.forElementSource`
+/// to chain-walk from — `seq`'s element type is only known transitively,
+/// from `seq`'s own call-return type. `callInstanceType` falls back to
+/// `InstanceType.forElementSequenceSymbol` and recurses into `seq`'s own
+/// `callInstanceType` when the direct annotation/struct-literal/call-init
+/// shapes all come back empty for the payload symbol itself.
 fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
     for (project.files.items) |file| {
         const semantic = &file.semantic;
@@ -315,7 +324,10 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
 
     if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) return null;
     if (InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) != null) return null;
-    const fn_expr = InstanceType.callInit(semantic, sym_id) orelse return null;
+    const fn_expr = InstanceType.callInit(semantic, sym_id) orelse {
+        const seq_sym = InstanceType.forElementSequenceSymbol(semantic, sym_id) orelse return null;
+        return callInstanceType(project, file_id, seq_sym);
+    };
 
     const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return null;
     const fn_semantic = &project.file(fn_sym.file).semantic;

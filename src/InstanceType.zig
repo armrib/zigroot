@@ -52,6 +52,16 @@
 //! already finds its instance methods; the only missing piece is that
 //! resolution itself.
 //!
+//! Phase 25: `forElementSource`'s same-file chain-walk comes back empty for
+//! a `for (seq) |x|` payload when `seq` is a plain call-init variable (`const
+//! tail = tailOf(...);`, no type annotation of its own) — there's no
+//! type-position node on `seq` to walk from, since its element type is only
+//! known transitively, from whatever function `tailOf` calls to build it.
+//! `forElementSequenceSymbol` exposes `seq`'s own base symbol (skipping the
+//! chain-walk entirely) so `Resolver.callInstanceType`, which already knows
+//! how to resolve a call-init variable's type across `@import` boundaries,
+//! can recurse into `seq` itself and reuse that.
+//!
 //! `resolve` only resolves a type expression that stays within one file.
 //! `crossFileRoot` is the other half, for `Resolver`: when the type
 //! expression's root identifier doesn't resolve to anything with the
@@ -244,7 +254,17 @@ fn thenPayloadCondExpr(ast: *const Ast, parent: Ast.Node.Index, then_expr: Ast.N
 /// rather than going through a parent lookup. `null` for every other
 /// payload shape, or if the matched input isn't a same-file identifier/
 /// field-access chain.
-fn forElementSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+const ForElementInput = struct {
+    sym: Semantic.Symbol.Id,
+    node: Ast.Node.Index,
+};
+
+/// If `sym_id` is a `for (seq) |x|` loop-payload capture, the base symbol
+/// and node the positionally-matched `for`-input expression's identifier
+/// resolves to — the same matching `forElementSource` does, stopping short
+/// of walking it any further. `null` for every other payload shape, or if
+/// the matched input isn't a same-file identifier/field-access chain.
+fn forElementInputBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ForElementInput {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_payload) return null;
 
@@ -271,9 +291,27 @@ fn forElementSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_i
         base_node = ast.nodeData(base_node).node_and_token[0];
     }
     const base_sym = referenceAt(semantic, base_node) orelse return null;
+    return .{ .sym = base_sym, .node = base_node };
+}
 
-    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+fn forElementSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const base = forElementInputBase(semantic, sym_id) orelse return null;
+    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base.sym, base.node, .definite);
     return chain.result.symbol;
+}
+
+/// If `sym_id` is a `for (seq) |x|` loop-payload capture, `seq`'s own base
+/// symbol — the bare sequence variable/field itself, with none of
+/// `forElementSource`'s forward `.field`/`[]` chain-walking applied. Lets a
+/// caller with cross-file, call-return-type resolution `forElementSource`
+/// doesn't have (`Resolver.callInstanceType`) try that on the sequence
+/// itself when `forElementSource`'s same-file walk comes back empty-handed
+/// — e.g. `const tail = tailOf(...); for (tail) |*e| { e.payload(); }`,
+/// where `tail`'s element type is only known from `tailOf`'s declared
+/// return type, not from any type annotation on `tail` itself.
+pub fn forElementSequenceSymbol(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const base = forElementInputBase(semantic, sym_id) orelse return null;
+    return base.sym;
 }
 
 /// If `sym_id` is a variable with no explicit type annotation, declared as

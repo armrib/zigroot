@@ -193,6 +193,63 @@ test "a symbol only reachable via a cross-file-typed variable's instance method 
     try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
 }
 
+test "a for-loop payload over a call-init variable chains an instance method" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const entry_mod = @import("entry.zig");
+        \\
+        \\fn tailOf(buf: []entry_mod.Entry, n: usize) []entry_mod.Entry {
+        \\    return buf[0..n];
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    var buf: [4]entry_mod.Entry = undefined;
+        \\    const tail = tailOf(buf[0..], 2);
+        \\    for (tail) |*e| {
+        \\        _ = e.payload();
+        \\    }
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "entry.zig",
+        \\pub const Entry = struct {
+        \\    v: u32 = 0,
+        \\    pub fn payload(self: *const Entry) u32 { return self.v; }
+        \\    pub fn unused(self: *const Entry) u32 { return self.v; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const entry_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "entry.zig")) break f.id;
+    } else unreachable;
+    const entry_semantic = &project.file(entry_id).semantic;
+    const payload_sym = entry_semantic.symbols.getSymbolNamed("payload").?;
+    const unused_sym = entry_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = entry_id, .local = payload_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = entry_id, .local = unused_sym }));
+}
+
 test "a symbol only reachable via a generic type-returning function's init is not reported dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
