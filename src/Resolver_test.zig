@@ -421,3 +421,59 @@ test "a symbol only reachable across an @import is not reported dead" {
     try t.expect(reachability.isReachable(.{ .file = storage_id, .local = start_sym }));
     try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
 }
+
+test "const Schema = @import(\"json.zig\").Schema narrows the binding to that export, not the file root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Schema = @import("json.zig").Schema;
+        \\pub fn main() !Schema {
+        \\    var ctx: Schema.Context = .{};
+        \\    return Schema{ .int = ctx.dummy() };
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "json.zig",
+        \\pub const Schema = union(enum) {
+        \\    int: i32,
+        \\
+        \\    pub const Context = struct {
+        \\        pub fn dummy(self: *Context) i32 {
+        \\            _ = self;
+        \\            return 0;
+        \\        }
+        \\    };
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const json_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "json.zig")) break f.id;
+    } else unreachable;
+    const json_semantic = &project.file(json_id).semantic;
+    const schema_sym = json_semantic.symbols.getSymbolNamed("Schema").?;
+    const context_sym = json_semantic.symbols.getSymbolNamed("Context").?;
+    const dummy_sym = json_semantic.symbols.getSymbolNamed("dummy").?;
+
+    try t.expect(reachability.isReachable(.{ .file = json_id, .local = schema_sym }));
+    try t.expect(reachability.isReachable(.{ .file = json_id, .local = context_sym }));
+    try t.expect(reachability.isReachable(.{ .file = json_id, .local = dummy_sym }));
+}

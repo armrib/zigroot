@@ -48,6 +48,12 @@
 //! of its own to match a further hop against — is handled by
 //! `FieldChain.findExport` itself, so every hop through this walk gets it
 //! for free.
+//!
+//! Phase 20: `const Schema = @import("json.zig").Schema;` binds to one
+//! export of the target file, not the whole file, right at the
+//! `@import(...)` call — `aliasRoot` detects this and resolves every
+//! reference to the binding (further field hops and bare uses alike)
+//! against that export instead of the target file's root.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -56,6 +62,7 @@ const Semantic = zlint.Semantic;
 const Ast = Semantic.Ast;
 
 const Project = @import("Project.zig");
+const ImportGraph = @import("ImportGraph.zig");
 const FileId = @import("FileId.zig").FileId;
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const SymbolGraph = @import("SymbolGraph.zig");
@@ -83,27 +90,43 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
         const target_file = project.file(import_edge.to);
         const target_semantic = &target_file.semantic;
 
+        // `const Schema = @import("json.zig").Schema;` narrows the binding
+        // to one export of the target file right at the `@import(...)`
+        // call itself, rather than the whole file root — see `aliasRoot`.
+        const import_root = aliasRoot(&from_file.semantic, import_edge.node, target_semantic, &target_file.owner_map) orelse FILE_ROOT_SYMBOL;
+
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
             const owner = from_file.owner_map.get(ref.node) orelse continue;
             const owner_id: SymbolId = .{ .file = import_edge.from, .local = owner };
 
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
-                const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, field_name) orelse continue;
+                const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, import_root, field_name) orelse continue;
                 const field_node = from_file.semantic.node_links.getParent(ref.node).?;
                 try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
                 continue;
             }
 
-            if (DynamicField.resolve(&from_file.semantic, target_semantic, FILE_ROOT_SYMBOL, ref.node)) |resolution| switch (resolution) {
-                .possible => |target| {
-                    const field_node = from_file.semantic.node_links.getParent(ref.node).?;
-                    try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
-                },
-                .unknown => |exports| for (exports) |target| {
-                    try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .unknown);
-                },
-            };
+            if (DynamicField.resolve(&from_file.semantic, target_semantic, import_root, ref.node)) |resolution| {
+                switch (resolution) {
+                    .possible => |target| {
+                        const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+                        try addChain(&graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
+                    },
+                    .unknown => |exports| for (exports) |target| {
+                        try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, ref.node, .unknown);
+                    },
+                }
+                continue;
+            }
+
+            // A bare reference to an alias binding narrowed by `import_root`
+            // above (e.g. `Schema{...}`, `fn f() Schema`) — nothing further
+            // to chase, but the aliased declaration itself is what needs to
+            // be reachable, not just its own further field hops.
+            if (import_root != FILE_ROOT_SYMBOL) {
+                try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = import_root }, ref.node, .definite);
+            }
         }
     }
 
@@ -111,6 +134,23 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     try buildCallInstanceTypes(gpa, &graph, project);
 
     return graph;
+}
+
+/// Phase 20: if `import_node` (the `@import(...)` call itself) is
+/// immediately field-accessed (`@import("json.zig").Schema`, as opposed to
+/// a whole-module binding like `@import("storage.zig")`), the symbol that
+/// field names in the target file — `null` if `import_node` isn't
+/// field-accessed this way, or the field doesn't match one of the target
+/// file's exports. A binding declared this way (`const Schema =
+/// @import("json.zig").Schema;`) is narrowed to that one export before it's
+/// ever named locally, so every reference to the binding — whether a
+/// further field hop (`Schema.Context`) or a bare use (`Schema{...}`, `fn
+/// f() Schema`) — needs to resolve against *this* symbol instead of the
+/// target file's root, which is what `build`'s main loop otherwise assumes
+/// every binding represents.
+fn aliasRoot(from_semantic: *const Semantic, import_node: Semantic.Ast.Node.Index, target_semantic: *const Semantic, target_owner_map: *const OwnerMap) ?Semantic.Symbol.Id {
+    const field_name = FieldChain.fieldAccessName(from_semantic, import_node) orelse return null;
+    return FieldChain.findExport(target_semantic, target_owner_map, FILE_ROOT_SYMBOL, field_name);
 }
 
 /// Phase 15: `var s: storage.Widget = ...; s.run();`, where `storage` is an
@@ -135,10 +175,11 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
             if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
             const root = InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) orelse continue;
 
-            const target_file_id = importTarget(project, file.id, root.base) orelse continue;
+            const target = importTargetRoot(project, file.id, root.base) orelse continue;
+            const target_file_id = target.file;
             const target_file = project.file(target_file_id);
             const target_semantic = &target_file.semantic;
-            const ty = FieldChain.findExport(target_semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, root.field) orelse continue;
+            const ty = FieldChain.findExport(target_semantic, &target_file.owner_map, target.root, root.field) orelse continue;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
@@ -150,15 +191,27 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
     }
 }
 
-/// The target file of one of `file_id`'s `@import` edges whose binding
-/// symbol is `base`, if any.
-fn importTarget(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?FileId {
+/// One of `file_id`'s `@import` edges whose binding symbol is `base`, if
+/// any.
+fn importEdge(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?ImportGraph.Edge {
     for (project.import_graph.edges.items) |edge| {
         if (edge.from != file_id) continue;
         const binding = project.file(edge.from).owner_map.get(edge.node) orelse continue;
-        if (binding == base) return edge.to;
+        if (binding == base) return edge;
     }
     return null;
+}
+
+/// `importTarget`'s target file plus, if `base` is an alias binding
+/// narrowed to one export (see `aliasRoot`), that export — otherwise the
+/// target file's own root. The container every `base.field` hop into the
+/// target file should resolve against.
+fn importTargetRoot(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?struct { file: FileId, root: Semantic.Symbol.Id } {
+    const edge = importEdge(project, file_id, base) orelse return null;
+    const target_file = project.file(edge.to);
+    const from_semantic = &project.file(file_id).semantic;
+    const root = aliasRoot(from_semantic, edge.node, &target_file.semantic, &target_file.owner_map) orelse FILE_ROOT_SYMBOL;
+    return .{ .file = edge.to, .root = root };
 }
 
 /// Phase 17: `var s = Foo.init(...); s.run();`, where `Foo.init` (or its
@@ -287,10 +340,10 @@ fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
         return .{ .file = base.file, .local = found };
     }
 
-    const target_file_id = importTarget(project, base.file, base.local) orelse return null;
-    const target_file = project.file(target_file_id);
-    const found = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, field) orelse return null;
-    return .{ .file = target_file_id, .local = found };
+    const target = importTargetRoot(project, base.file, base.local) orelse return null;
+    const target_file = project.file(target.file);
+    const found = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, field) orelse return null;
+    return .{ .file = target.file, .local = found };
 }
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
