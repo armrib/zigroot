@@ -389,7 +389,11 @@ fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, 
     const decl = ast.fullVarDecl(symbol.decl) orelse return null;
     if (decl.ast.type_node.unwrap() != null) return null;
 
-    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    var init_node = decl.ast.init_node.unwrap() orelse return null;
+    switch (ast.nodeTag(init_node)) {
+        .@"catch", .@"orelse" => init_node = ast.nodeData(init_node).node_and_node[0],
+        else => {},
+    }
     switch (ast.nodeTag(init_node)) {
         .identifier, .field_access => {},
         else => return null,

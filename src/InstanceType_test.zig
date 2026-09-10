@@ -642,6 +642,31 @@ test "a field-access-initialized variable with an explicit type annotation still
     try t.expectEqual(server_id, InstanceType.resolve(&sem, &owner_map, srv_id).?);
 }
 
+test "an orelse-wrapped field-access-initialized variable resolves to the field's declared type's symbol" {
+    var sem = try build(
+        \\const Server = struct {
+        \\    pub fn drive(self: *Server) void { _ = self; }
+        \\};
+        \\const AppCtx = struct {
+        \\    srv: ?*Server = null,
+        \\};
+        \\fn finish(ctx: *AppCtx) void {
+        \\    const srv = ctx.srv orelse return;
+        \\    srv.drive();
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const server_id = sem.symbols.getSymbolNamed("Server").?;
+    const srv_id = sem.symbols.getSymbolNamed("srv").?;
+
+    try t.expectEqual(server_id, InstanceType.resolve(&sem, &owner_map, srv_id).?);
+}
+
 test "a call-initialized variable is still unresolved (field-access-init handling doesn't overreach)" {
     var sem = try build(
         \\const Server = struct {
