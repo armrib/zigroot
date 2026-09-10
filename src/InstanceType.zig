@@ -35,6 +35,16 @@
 //! resolving that instead. `resolveTypeExpr`/`fieldAccessRoot` unwrap the
 //! leading `?` off whatever type node that turns up.
 //!
+//! Phase 24: `while (cond) |payload|` is the same shape as an `if`-payload
+//! (a `then_expr` decl node, `cond` naming the optional) under a different
+//! node tag, so it reuses the same handling. `for (seq) |x|` is a different
+//! shape — ZLint gives the `for` node itself as the `decl` node, shared by
+//! every capture in `|x, y|` — so its captured sequence is found by
+//! matching the capture's identifier token position against `for`'s input
+//! list positionally, then resolving *that* input's base symbol the same
+//! way. Its element type then falls out of the pointer/array unwrapping
+//! `resolveTypeExpr` already does for a `[]T`-typed declaration.
+//!
 //! ZLint doesn't yet distinguish `self`-taking instance methods from static
 //! functions declared in a container (see `Symbol.zig`'s "TODO: bind
 //! methods as members") — both land in `Symbol.exports`. So once a
@@ -68,6 +78,9 @@ const OwnerMap = @import("OwnerMap.zig");
 /// optional, a generic instantiation, or crosses an `@import` boundary).
 pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     if (optionalPayloadSource(semantic, owner_map, sym_id)) |source| {
+        return resolve(semantic, owner_map, source);
+    }
+    if (forElementSource(semantic, owner_map, sym_id)) |source| {
         return resolve(semantic, owner_map, source);
     }
     if (addressOfChainTarget(semantic, owner_map, sym_id)) |target| return target;
@@ -171,27 +184,89 @@ fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, node: 
     };
 }
 
-/// If `sym_id` is an `if (cond) |payload|` optional-payload capture (not
-/// the `else |err|` error-payload case, which `if_full.ast.then_expr`
-/// distinguishes from), the field/variable symbol whose own declared type
-/// is the optional being unwrapped — found by walking `cond`'s base
-/// identifier through `FieldChain.resolveChain` (the same instance-type-
-/// aware hopping `h.foo.bar()` needs, since `cond` is often itself a field
-/// chain like `self.meta_log`). `resolve`/`crossFileRoot` recurse into that
-/// symbol's own declared type, which `resolveTypeExpr`'s `.optional_type`
-/// case then unwraps. `null` for every other payload shape (`while`, `for`,
-/// `switch`, `catch |err|`) — ZLint gives those a different `decl` node
-/// shape, so `ast.fullIf` on its parent already returns `null` for them.
+/// If `sym_id` is an `if (cond) |payload|` or `while (cond) |payload|`
+/// optional-payload capture (not the `else |err|` error-payload case, which
+/// `then_expr` matching distinguishes from), the field/variable symbol
+/// whose own declared type is the optional being unwrapped — found by
+/// walking `cond`'s base identifier through `FieldChain.resolveChain` (the
+/// same instance-type-aware hopping `h.foo.bar()` needs, since `cond` is
+/// often itself a field chain like `self.meta_log`). `resolve`/
+/// `crossFileRoot` recurse into that symbol's own declared type, which
+/// `resolveTypeExpr`'s `.optional_type` case then unwraps. `null` for every
+/// other payload shape (`for`, `switch`, `catch |err|`) — ZLint gives those
+/// a different `decl` node shape, so `thenPayloadCondExpr` on the parent
+/// already returns `null` for them.
 fn optionalPayloadSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_payload) return null;
 
-    const if_node = semantic.node_links.getParent(symbol.decl) orelse return null;
+    const parent = semantic.node_links.getParent(symbol.decl) orelse return null;
     const ast = &semantic.parse.ast;
-    const if_full = ast.fullIf(if_node) orelse return null;
-    if (if_full.ast.then_expr != symbol.decl) return null;
+    const cond_expr = thenPayloadCondExpr(ast, parent, symbol.decl) orelse return null;
 
-    var base_node = if_full.ast.cond_expr;
+    var base_node = cond_expr;
+    while (ast.nodeTag(base_node) == .field_access) {
+        base_node = ast.nodeData(base_node).node_and_token[0];
+    }
+    const base_sym = referenceAt(semantic, base_node) orelse return null;
+
+    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+    return chain.result.symbol;
+}
+
+/// If `parent` is an `if` or `while` node whose `then_expr` is exactly
+/// `then_expr` (i.e. `then_expr` is that node's own payload-capturing
+/// block, not e.g. an `else |err|` branch), the condition expression being
+/// captured. `null` otherwise.
+fn thenPayloadCondExpr(ast: *const Ast, parent: Ast.Node.Index, then_expr: Ast.Node.Index) ?Ast.Node.Index {
+    if (ast.fullIf(parent)) |if_full| {
+        if (if_full.ast.then_expr != then_expr) return null;
+        return if_full.ast.cond_expr;
+    }
+    if (ast.fullWhile(parent)) |while_full| {
+        if (while_full.ast.then_expr != then_expr) return null;
+        return while_full.ast.cond_expr;
+    }
+    return null;
+}
+
+/// If `sym_id` is a `for (seq) |x|` loop-payload capture — plain or
+/// by-reference (`|*x|`), and however many other captures share the same
+/// `for` (`for (a, b) |x, y|`) — the field/variable symbol whose own
+/// declared type is the sequence being iterated, matched positionally: the
+/// capture's identifier token position among the `|...|` list picks out the
+/// corresponding `for`-input expression. `resolve`/`crossFileRoot` recurse
+/// into that symbol's own declared type, which `resolveTypeExpr`'s pointer/
+/// array unwrapping already reduces to the element type — the same
+/// unwrapping a `[]T`-typed variable's own declaration needs. Unlike `if`/
+/// `while` payloads, ZLint gives a `for`-payload's `decl` node as the `for`
+/// node itself (not its `then_expr`), so this checks `ast.fullFor` directly
+/// rather than going through a parent lookup. `null` for every other
+/// payload shape, or if the matched input isn't a same-file identifier/
+/// field-access chain.
+fn forElementSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_payload) return null;
+
+    const ast = &semantic.parse.ast;
+    const for_full = ast.fullFor(symbol.decl) orelse return null;
+    const own_token = (symbol.token.unwrap() orelse return null).int();
+
+    var idx: usize = 0;
+    var curr = for_full.payload_token;
+    while (true) : (curr += 1) {
+        switch (ast.tokenTag(curr)) {
+            .asterisk, .comma => {},
+            .identifier => {
+                if (curr == own_token) break;
+                idx += 1;
+            },
+            else => return null,
+        }
+    }
+    if (idx >= for_full.ast.inputs.len) return null;
+
+    var base_node = for_full.ast.inputs[idx];
     while (ast.nodeTag(base_node) == .field_access) {
         base_node = ast.nodeData(base_node).node_and_token[0];
     }
@@ -259,6 +334,9 @@ pub const CrossFileRoot = struct {
 /// (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
 pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
     if (optionalPayloadSource(semantic, owner_map, sym_id)) |source| {
+        return crossFileRoot(semantic, owner_map, source);
+    }
+    if (forElementSource(semantic, owner_map, sym_id)) |source| {
         return crossFileRoot(semantic, owner_map, source);
     }
     const candidates = declaredTypeNodes(semantic, sym_id);
