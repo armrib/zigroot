@@ -196,28 +196,7 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
 
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
-            if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
-            if (InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) != null) continue;
-            const fn_expr = InstanceType.callInit(semantic, sym_id) orelse continue;
-
-            const fn_sym = resolveValueChain(project, file.id, fn_expr) orelse continue;
-            const fn_semantic = &project.file(fn_sym.file).semantic;
-            const fn_symbol = fn_semantic.symbols.get(fn_sym.local);
-            if (!fn_symbol.flags.s_fn) continue;
-
-            const fn_ast = &fn_semantic.parse.ast;
-            var proto_buf: [1]Ast.Node.Index = undefined;
-            const proto = fn_ast.fullFnProto(&proto_buf, fn_symbol.decl) orelse continue;
-            var return_node = proto.ast.return_type.unwrap() orelse continue;
-            if (fn_ast.nodeTag(return_node) == .error_union) {
-                return_node = fn_ast.nodeData(return_node).node_and_node[1];
-            }
-
-            const ty: SymbolId = if (isTypeKeyword(fn_semantic, return_node)) blk: {
-                const fn_owner_map = &project.file(fn_sym.file).owner_map;
-                const container = FieldChain.containerOf(fn_semantic, fn_owner_map, fn_sym.local) orelse continue;
-                break :blk .{ .file = fn_sym.file, .local = container };
-            } else resolveValueChain(project, fn_sym.file, return_node) orelse continue;
+            const ty = callInstanceType(project, file.id, sym_id) orelse continue;
             const ty_file = project.file(ty.file);
             const ty_semantic = &ty_file.semantic;
 
@@ -229,6 +208,41 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
             }
         }
     }
+}
+
+/// `sym_id`'s type, resolved the way `buildCallInstanceTypes`' doc comment
+/// describes, if `sym_id` is declared `var s = Foo.init(...)` (or a
+/// generic-type-returning-function equivalent) and isn't already resolved
+/// by the cheaper annotation/struct-literal shapes. Exposed for `Roots`'
+/// `.test`-root case, which needs the same answer per-symbol rather than
+/// graph edges built from it.
+pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semantic.Symbol.Id) ?SymbolId {
+    const file = project.file(file_id);
+    const semantic = &file.semantic;
+
+    if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) return null;
+    if (InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) != null) return null;
+    const fn_expr = InstanceType.callInit(semantic, sym_id) orelse return null;
+
+    const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return null;
+    const fn_semantic = &project.file(fn_sym.file).semantic;
+    const fn_symbol = fn_semantic.symbols.get(fn_sym.local);
+    if (!fn_symbol.flags.s_fn) return null;
+
+    const fn_ast = &fn_semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = fn_ast.fullFnProto(&proto_buf, fn_symbol.decl) orelse return null;
+    var return_node = proto.ast.return_type.unwrap() orelse return null;
+    if (fn_ast.nodeTag(return_node) == .error_union) {
+        return_node = fn_ast.nodeData(return_node).node_and_node[1];
+    }
+
+    if (isTypeKeyword(fn_semantic, return_node)) {
+        const fn_owner_map = &project.file(fn_sym.file).owner_map;
+        const container = FieldChain.containerOf(fn_semantic, fn_owner_map, fn_sym.local) orelse return null;
+        return .{ .file = fn_sym.file, .local = container };
+    }
+    return resolveValueChain(project, fn_sym.file, return_node);
 }
 
 /// Whether `node` is the bare `type` keyword — the return-type spelling of a

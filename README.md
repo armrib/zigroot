@@ -86,6 +86,14 @@ Status: Phase 0-16. Implemented so far:
   the same way a locally-declared `var s: Foo` does — same-file and across
   an `@import` boundary, both through `SymbolGraph`/`Resolver` and `Roots`'
   `.test`-root case.
+- `Roots`' `.test`-root case also covers a test body referencing an
+  `@import` binding directly (`const tester = @import("tester.zig"); test {
+  tester.init(); }`) and `var runner = tester.init(); runner.run();` inside
+  a test body — both shapes a reference inside a `test { ... }` block has
+  no owning symbol for, so `Resolver`'s cross-file graph-building (keyed on
+  that owner) skips them entirely; `Roots` resolves the target directly
+  instead, reusing `Resolver`'s `callInstanceType` for the latter shape
+  (`src/Roots.zig`, `src/Resolver.zig`).
 
 Not yet implemented: an instance type named through a same-file chain
 *before* crossing an `@import` boundary (`var s: mod.storage.Widget =

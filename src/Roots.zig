@@ -16,7 +16,19 @@
 //!   this to `container.member` and `@field(...)` chains a test body
 //!   references (Phase 13); `InstanceType` (Phase 14/15) extends it further
 //!   to instance-method calls on a locally-typed variable declared in the
-//!   test body, same-file or across an `@import` boundary.
+//!   test body, same-file or across an `@import` boundary. Phase 20 covers
+//!   two more test-body shapes the same reasoning applies to: a reference
+//!   inside a `test { ... }` block has no owning symbol (`OwnerMap` finds
+//!   none, since the test block itself declares no symbol), so `Resolver`'s
+//!   cross-file graph-building — keyed on that owner — skips it entirely;
+//!   here the reference is already in hand, so the target is resolved and
+//!   rooted directly instead. That covers both a test body referencing an
+//!   `@import` binding directly (`const RuleTester = @import("tester.zig");
+//!   test { RuleTester.init(...); }`, via `importTarget` +
+//!   `FieldChain`/`DynamicField`) and `var runner = RuleTester.init(...);
+//!   runner.run(...);` inside the test body itself (via `Resolver`'s
+//!   `callInstanceType`, the same call-returns-a-type resolution
+//!   `SymbolGraph` edges outside tests already get).
 //! - `.public_api`: (Phase 8) every `pub` symbol, but only under
 //!   `PublicPolicy.root` (library mode) — see `PublicPolicy`.
 //!
@@ -30,7 +42,9 @@ const Project = @import("Project.zig");
 const FileId = @import("FileId.zig").FileId;
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
+const DynamicField = @import("DynamicField.zig");
 const InstanceType = @import("InstanceType.zig");
+const Resolver = @import("Resolver.zig");
 const OwnerMap = @import("OwnerMap.zig");
 const Semantic = zlint.Semantic;
 const Scope = Semantic.Scope;
@@ -103,6 +117,8 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
         while (sym_it.next()) |sym_id| {
             const instance_ty = InstanceType.resolve(semantic, &f.owner_map, sym_id);
             const cross_instance = if (instance_ty == null) crossInstanceType(project, f.id, semantic, &f.owner_map, sym_id) else null;
+            const call_instance = if (instance_ty == null and cross_instance == null) Resolver.callInstanceType(project, f.id, sym_id) else null;
+            const import_target = importTarget(project, f.id, sym_id);
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
@@ -136,6 +152,45 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
                     }
                     if (inst_chain.unknown) |unknown| for (unknown.exports) |target| {
                         try roots.add(gpa, .{ .file = cross.file, .local = target }, .@"test");
+                    };
+                }
+
+                if (call_instance) |call| {
+                    const target_file = project.file(call.file);
+                    const inst_chain = FieldChain.resolveChain(semantic, &target_file.semantic, &target_file.owner_map, call.local, ref.node, .possible);
+                    if (inst_chain.result.symbol != call.local) {
+                        try roots.add(gpa, .{ .file = call.file, .local = inst_chain.result.symbol }, .@"test");
+                    }
+                    if (inst_chain.unknown) |unknown| for (unknown.exports) |target| {
+                        try roots.add(gpa, .{ .file = call.file, .local = target }, .@"test");
+                    };
+                }
+
+                if (import_target) |target_file_id| {
+                    const target_file = project.file(target_file_id);
+                    const target_semantic = &target_file.semantic;
+
+                    if (FieldChain.fieldAccessName(semantic, ref.node)) |field_name| {
+                        if (FieldChain.findExport(target_semantic, &target_file.owner_map, FILE_ROOT_SYMBOL, field_name)) |target_local| {
+                            const field_node = semantic.node_links.getParent(ref.node).?;
+                            const cross_chain = FieldChain.resolveChain(semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
+                            try roots.add(gpa, .{ .file = target_file_id, .local = cross_chain.result.symbol }, .@"test");
+                            if (cross_chain.unknown) |unknown| for (unknown.exports) |target| {
+                                try roots.add(gpa, .{ .file = target_file_id, .local = target }, .@"test");
+                            };
+                        }
+                    } else if (DynamicField.resolve(semantic, target_semantic, FILE_ROOT_SYMBOL, ref.node)) |resolution| switch (resolution) {
+                        .possible => |target_local| {
+                            const field_node = semantic.node_links.getParent(ref.node).?;
+                            const cross_chain = FieldChain.resolveChain(semantic, target_semantic, &target_file.owner_map, target_local, field_node, .possible);
+                            try roots.add(gpa, .{ .file = target_file_id, .local = cross_chain.result.symbol }, .@"test");
+                            if (cross_chain.unknown) |unknown| for (unknown.exports) |target| {
+                                try roots.add(gpa, .{ .file = target_file_id, .local = target }, .@"test");
+                            };
+                        },
+                        .unknown => |exports| for (exports) |target| {
+                            try roots.add(gpa, .{ .file = target_file_id, .local = target }, .@"test");
+                        },
                     };
                 }
             }
