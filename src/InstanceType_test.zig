@@ -275,6 +275,74 @@ test "crossFileRoot finds the base and field of a cross-file-typed container fie
     try t.expectEqualStrings("Widget", root.field);
 }
 
+test "an if-payload capture of an optional field resolves to the field's unwrapped type" {
+    var sem = try build(
+        \\const MetaLog = struct {
+        \\    pub fn append(self: *MetaLog) void { _ = self; }
+        \\};
+        \\const State = struct {
+        \\    meta_log: ?MetaLog,
+        \\    pub fn meta_append(self: *State) void {
+        \\        if (self.meta_log) |*log| log.append();
+        \\    }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const meta_log_ty = sem.symbols.getSymbolNamed("MetaLog").?;
+    const log_id = sem.symbols.getSymbolNamed("log").?;
+
+    try t.expectEqual(meta_log_ty, InstanceType.resolve(&sem, &owner_map, log_id).?);
+}
+
+test "an if-payload capture of a cross-file-typed optional field surfaces a crossFileRoot" {
+    var sem = try build(
+        \\const ml = 0;
+        \\const State = struct {
+        \\    meta_log: ?ml.MetaLog,
+        \\    pub fn meta_append(self: *State) void {
+        \\        if (self.meta_log) |*log| log.append();
+        \\    }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const ml_id = sem.symbols.getSymbolNamed("ml").?;
+    const log_id = sem.symbols.getSymbolNamed("log").?;
+
+    const root = InstanceType.crossFileRoot(&sem, &owner_map, log_id).?;
+    try t.expectEqual(ml_id, root.base);
+    try t.expectEqualStrings("MetaLog", root.field);
+}
+
+test "an error-branch payload (`else |err|`) is not treated as an optional payload" {
+    var sem = try build(
+        \\const Foo = struct {};
+        \\fn a() !void {
+        \\    const x: anyerror!Foo = error.Oops;
+        \\    if (x) |_| {} else |err| {
+        \\        _ = err;
+        \\    }
+        \\}
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const err_id = sem.symbols.getSymbolNamed("err").?;
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, &owner_map, err_id));
+}
+
 test "a non-variable symbol resolves to null" {
     var sem = try build(
         \\const Foo = struct {};

@@ -530,3 +530,60 @@ test "an instance method reached through a cross-file-typed struct field is not 
     try t.expect(reachability.isReachable(.{ .file = meta_state_id, .local = is_member_sym }));
     try t.expect(!reachability.isReachable(.{ .file = meta_state_id, .local = unused_sym }));
 }
+
+test "an instance method reached through an if-payload capture of a cross-file-typed optional field is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // The issue-01 shape: `log`'s type is never spelled out, it's the
+    // unwrapped payload of `self.meta_log`'s own declared type
+    // (`?ml.MetaLog`), bound by an `if (...) |*log|` capture.
+    try writeFile(tmp.dir, "main.zig",
+        \\const ml = @import("meta_log.zig");
+        \\pub const State = struct {
+        \\    meta_log: ?ml.MetaLog,
+        \\    pub fn meta_append(self: *State) void {
+        \\        if (self.meta_log) |*log| log.append();
+        \\    }
+        \\};
+        \\pub fn main() void {
+        \\    var state: State = undefined;
+        \\    state.meta_append();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "meta_log.zig",
+        \\pub const MetaLog = struct {
+        \\    pub fn append(self: *MetaLog) void { _ = self; }
+        \\    pub fn unused(self: *MetaLog) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const meta_log_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "meta_log.zig")) break f.id;
+    } else unreachable;
+    const meta_log_semantic = &project.file(meta_log_id).semantic;
+    const append_sym = meta_log_semantic.symbols.getSymbolNamed("append").?;
+    const unused_sym = meta_log_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = meta_log_id, .local = append_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = meta_log_id, .local = unused_sym }));
+}
