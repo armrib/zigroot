@@ -193,6 +193,58 @@ test "a symbol only reachable via a cross-file-typed variable's instance method 
     try t.expect(!reachability.isReachable(.{ .file = storage_id, .local = unused_sym }));
 }
 
+test "allocator.create(T) resolves T from the call's argument, not a return-type annotation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const std = @import("std");
+        \\const foo = @import("foo.zig");
+        \\
+        \\pub fn main() !void {
+        \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        \\    const allocator = gpa.allocator();
+        \\    const server = try allocator.create(foo.Foo);
+        \\    server.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "foo.zig",
+        \\pub const Foo = struct {
+        \\    pub fn run(self: *Foo) void { _ = self; }
+        \\    pub fn unused(self: *Foo) void { _ = self; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const foo_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "foo.zig")) break f.id;
+    } else unreachable;
+    const foo_semantic = &project.file(foo_id).semantic;
+    const run_sym = foo_semantic.symbols.getSymbolNamed("run").?;
+    const unused_sym = foo_semantic.symbols.getSymbolNamed("unused").?;
+
+    try t.expect(reachability.isReachable(.{ .file = foo_id, .local = run_sym }));
+    try t.expect(!reachability.isReachable(.{ .file = foo_id, .local = unused_sym }));
+}
+
 test "a for-loop payload over a call-init variable chains an instance method" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

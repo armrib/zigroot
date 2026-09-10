@@ -317,12 +317,21 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
 /// by the cheaper annotation/struct-literal shapes. Exposed for `Roots`'
 /// `.test`-root case, which needs the same answer per-symbol rather than
 /// graph edges built from it.
+///
+/// Phase 29: `const s = try allocator.create(Foo);` is resolved directly
+/// from `InstanceType.allocatorCreateTypeArg`'s argument-position type node
+/// — `Foo`'s own `resolveValueChain`, no callee/return-type chase needed,
+/// since `Foo` is already the type in question rather than something whose
+/// return type must be read.
 pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semantic.Symbol.Id) ?SymbolId {
     const file = project.file(file_id);
     const semantic = &file.semantic;
 
     if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) return null;
     if (InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) != null) return null;
+    if (InstanceType.allocatorCreateTypeArg(semantic, sym_id)) |type_arg| {
+        return resolveValueChain(project, file_id, type_arg);
+    }
     const fn_expr = InstanceType.callInit(semantic, sym_id) orelse {
         const seq_sym = InstanceType.forElementSequenceSymbol(semantic, sym_id) orelse return null;
         return callInstanceType(project, file_id, seq_sym);

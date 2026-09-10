@@ -529,6 +529,39 @@ pub fn callInit(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node
     return call.ast.fn_expr;
 }
 
+/// Phase 29: `const s = try allocator.create(Foo);` is a different call-init
+/// shape than `callInit`/`resolveFnReturnType` handle — `create`'s callee
+/// lives in `std.mem.Allocator` (no project-local AST to read a return type
+/// off), and the pointee type isn't a return annotation at all, it's spelled
+/// out as `Foo` in the call's own argument list. `allocatorCreateTypeArg`
+/// reads that argument node directly instead of trying to chase a callee's
+/// return type. `null` if `sym_id` isn't such a variable, its initializer
+/// isn't a call, the callee isn't a `.create` member-access hop, or the call
+/// has no arguments.
+pub fn allocatorCreateTypeArg(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node.Index {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+
+    var init_node = decl.ast.init_node.unwrap() orelse return null;
+    switch (ast.nodeTag(init_node)) {
+        .@"try" => init_node = ast.nodeData(init_node).node,
+        .@"catch", .@"orelse" => init_node = ast.nodeData(init_node).node_and_node[0],
+        else => {},
+    }
+
+    var buf: [1]Ast.Node.Index = undefined;
+    const call = ast.fullCall(&buf, init_node) orelse return null;
+    if (ast.nodeTag(call.ast.fn_expr) != .field_access) return null;
+    const data = ast.nodeData(call.ast.fn_expr).node_and_token;
+    if (!std.mem.eql(u8, semantic.tokenSlice(data[1]), "create")) return null;
+    if (call.ast.params.len == 0) return null;
+    return call.ast.params[0];
+}
+
 /// The symbol the `Reference` recorded at exactly `node` resolves to, if
 /// any. ZLint records one `Reference` per identifier use, keyed by that
 /// identifier's own node, but doesn't index them by node for lookup — this
