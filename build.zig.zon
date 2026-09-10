@@ -6,7 +6,8 @@
 
     .dependencies = .{
         .zlint = .{
-            .path = "vendor/zlint",
+            .url = "https://github.com/DonIsaac/zlint/archive/8cbbb1c9c48ebc091d9b230bb98355d53cc251ad.tar.gz",
+            .hash = "zlint-0.8.1-6ZchDnK_DQCREIs3I2jsQnGhNjVhODJ0gJiyHTJr4f1a",
         },
     },
 

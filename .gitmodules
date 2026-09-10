@@ -1,3 +1,0 @@
-[submodule "vendor/zlint"]
-	path = vendor/zlint
-	url = https://github.com/DonIsaac/zlint
