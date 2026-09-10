@@ -123,6 +123,63 @@ test "crossFileRoot returns null for a bare identifier type (not a field-access 
     try t.expectEqual(@as(?InstanceType.CrossFileRoot, null), InstanceType.crossFileRoot(&sem, s_id));
 }
 
+test "a pointer-typed self parameter resolves to its declared type's symbol" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn run(self: *Foo) void { _ = self; }
+        \\    pub fn visit(self: *Foo) void { self.run(); }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    const foo_id = sem.symbols.getSymbolNamed("Foo").?;
+    const self_id = sem.symbols.getSymbolNamed("self").?;
+
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, self_id).?);
+}
+
+test "a by-value typed parameter resolves to its declared type's symbol" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn run(self: Foo) void { _ = self; }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    const foo_id = sem.symbols.getSymbolNamed("Foo").?;
+    const self_id = sem.symbols.getSymbolNamed("self").?;
+
+    try t.expectEqual(foo_id, InstanceType.resolve(&sem, self_id).?);
+}
+
+test "crossFileRoot finds the base and field of a field-access-typed parameter" {
+    var sem = try build(
+        \\const storage = 0;
+        \\fn a(self: *storage.Widget) void { _ = self; }
+        \\
+    );
+    defer sem.deinit();
+
+    const storage_id = sem.symbols.getSymbolNamed("storage").?;
+    const self_id = sem.symbols.getSymbolNamed("self").?;
+    const root = InstanceType.crossFileRoot(&sem, self_id).?;
+    try t.expectEqual(storage_id, root.base);
+    try t.expectEqualStrings("Widget", root.field);
+}
+
+test "a parameter with no statically-named type resolves to null" {
+    var sem = try build(
+        \\fn a(x: anytype) void { _ = x; }
+        \\
+    );
+    defer sem.deinit();
+
+    const x_id = sem.symbols.getSymbolNamed("x").?;
+    try t.expectEqual(@as(?Semantic.Symbol.Id, null), InstanceType.resolve(&sem, x_id));
+}
+
 test "a non-variable symbol resolves to null" {
     var sem = try build(
         \\const Foo = struct {};

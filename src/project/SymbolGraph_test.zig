@@ -155,6 +155,35 @@ test "s.run() on an explicitly-typed variable edges to the type's run at .possib
     try t.expectEqual(SymbolGraph.EdgeKind.possible, found.?.kind);
 }
 
+test "self.helper() inside a method taking self: *Foo edges to Foo's helper at .possible confidence" {
+    var sem = try build(
+        \\const Foo = struct {
+        \\    pub fn helper(self: *Foo) void { _ = self; }
+        \\    pub fn visit(self: *Foo) void { self.helper(); }
+        \\};
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const file: FileId = .fromIndex(0);
+    var graph = try SymbolGraph.build(t.allocator, file, &sem, &owner_map);
+    defer graph.deinit(t.allocator);
+
+    const visit_id = sem.symbols.getSymbolNamed("visit").?;
+    const helper_id = sem.symbols.getSymbolNamed("helper").?;
+
+    const outgoing = graph.outgoing(.{ .file = file, .local = visit_id });
+    var found: ?SymbolGraph.Target = null;
+    for (outgoing) |edge| {
+        if (edge.to.eql(.{ .file = file, .local = helper_id })) found = edge;
+    }
+    try t.expect(found != null);
+    try t.expectEqual(SymbolGraph.EdgeKind.possible, found.?.kind);
+}
+
 test "@field(Foo, \"Bar\").baz() chains from the @field hop into a further .field hop" {
     var sem = try build(
         \\const Foo = struct {

@@ -80,13 +80,16 @@ Status: Phase 0-16. Implemented so far:
   own references the same way. `Roots`' `.test`-root case resolves instance
   types too, both same-file and cross-file, so an instance-method call in a
   `test { ... }` block seeds reachability from the method the same way a
-  static `Foo.run()` call in a test already did.
+  static `Foo.run()` call in a test already did. `InstanceType` also reads a
+  function *parameter*'s declared type the same way, so `self`-receiver
+  methods (`fn visit(self: *Foo) void { self.run(); }`) resolve `self.run()`
+  the same way a locally-declared `var s: Foo` does — same-file and across
+  an `@import` boundary, both through `SymbolGraph`/`Resolver` and `Roots`'
+  `.test`-root case.
 
 Not yet implemented: an instance type named through a same-file chain
 *before* crossing an `@import` boundary (`var s: mod.storage.Widget =
-...`), a value's type inferred from a function parameter (`self.run()`
-inside a method taking `self: *Foo`) rather than spelled out locally,
-a nested `const Self = @This();` alias (only the file-top-level case
+...`), a nested `const Self = @This();` alias (only the file-top-level case
 resolves), per-target file sets in `build.zig` (e.g. `linux.zig` vs
 `windows.zig` chosen by target), and a few other gaps found by running
 against a real codebase. See `issues/` for the full list.

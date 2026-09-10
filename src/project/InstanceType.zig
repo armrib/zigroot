@@ -2,13 +2,19 @@
 //! (`var s: Foo = ...; s.run();` / `var s = Foo{...}; s.run();`).
 //!
 //! Not real type inference — still out of scope, per `FieldChain`'s doc
-//! comment. This only handles the two shapes where a variable's type is
-//! spelled out syntactically in its own declaration: an explicit type
-//! annotation (`var s: Foo = ...`), or an explicitly-typed struct-literal
-//! initializer (`var s = Foo{...}`, as opposed to the anonymous `var s: Foo
-//! = .{...}`, which the type-annotation case already covers). A value
-//! passed as a function parameter, returned from a call, or otherwise
-//! inferred is still unresolved.
+//! comment. This only handles the shapes where a variable's type is spelled
+//! out syntactically in its own declaration: an explicit type annotation
+//! (`var s: Foo = ...`), or an explicitly-typed struct-literal initializer
+//! (`var s = Foo{...}`, as opposed to the anonymous `var s: Foo = .{...}`,
+//! which the type-annotation case already covers). A value returned from a
+//! call, or otherwise inferred, is still unresolved.
+//!
+//! Phase 18: a function parameter's declared type (`fn f(self: *Foo) void`)
+//! is the same kind of syntactically-spelled-out type, just read off a
+//! `fullFnProto` param instead of a `fullVarDecl` — this is the pervasive
+//! `self`-receiver shape idiomatic Zig methods use, so it's handled the same
+//! way as the variable cases above (one leading pointer is unwrapped, since
+//! `self: *Foo` is far more common than a by-value receiver).
 //!
 //! ZLint doesn't yet distinguish `self`-taking instance methods from static
 //! functions declared in a container (see `Symbol.zig`'s "TODO: bind
@@ -34,13 +40,20 @@ const FieldChain = @import("FieldChain.zig");
 
 /// If `sym_id` is a variable (`var`/`const`) declared with a syntactically
 /// resolvable type — an explicit type annotation, or an explicitly-typed
-/// struct-literal initializer — the symbol that type expression names.
-/// `null` if `sym_id` isn't a variable, has no such type expression, or the
-/// type expression isn't a plain identifier / same-file `.field` chain to
-/// one (e.g. it's a pointer type, an optional, a generic instantiation, or
-/// crosses an `@import` boundary).
+/// struct-literal initializer — or a function parameter with a syntactically
+/// resolvable type (optionally behind one leading pointer, e.g. a `self:
+/// *Foo` receiver) — the symbol that type expression names. `null` if
+/// `sym_id` is neither, has no such type expression, or the type expression
+/// isn't a plain identifier / same-file `.field` chain to one (e.g. it's an
+/// optional, a generic instantiation, or crosses an `@import` boundary).
 pub fn resolve(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const symbol = semantic.symbols.get(sym_id);
+
+    if (symbol.flags.s_fn_param) {
+        const type_node = paramTypeNode(semantic, symbol) orelse return null;
+        return resolveTypeExpr(semantic, type_node);
+    }
+
     if (!symbol.flags.s_variable) return null;
 
     const ast = &semantic.parse.ast;
@@ -55,6 +68,18 @@ pub fn resolve(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Semantic.
     const struct_init = ast.fullStructInit(&buf, init_node) orelse return null;
     const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
     return resolveTypeExpr(semantic, type_expr);
+}
+
+/// A function parameter symbol's declared type node, with one leading
+/// pointer unwrapped (`self: *Foo` -> `Foo`'s node, `self: Foo` -> `Foo`'s
+/// node unchanged). ZLint's `SemanticBuilder.visitFnProtoParams` sets a
+/// parameter symbol's `decl` to its `type_expr` node directly (there's no
+/// separate param node to unwrap first, unlike `fullVarDecl`).
+fn paramTypeNode(semantic: *const Semantic, symbol: *const Semantic.Symbol) ?Ast.Node.Index {
+    const ast = &semantic.parse.ast;
+    const node = symbol.decl;
+    if (ast.fullPtrType(node)) |ptr| return ptr.ast.child_type;
+    return node;
 }
 
 /// Resolves a type-position expression node to the symbol it names: a bare
@@ -93,6 +118,12 @@ pub const CrossFileRoot = struct {
 /// it doesn't (`storage.Widget`, `storage` bound to `@import("storage.zig")`).
 pub fn crossFileRoot(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?CrossFileRoot {
     const symbol = semantic.symbols.get(sym_id);
+
+    if (symbol.flags.s_fn_param) {
+        const type_node = paramTypeNode(semantic, symbol) orelse return null;
+        return fieldAccessRoot(semantic, type_node);
+    }
+
     if (!symbol.flags.s_variable) return null;
 
     const ast = &semantic.parse.ast;
