@@ -64,6 +64,40 @@ test "a reference nested inside a block is still owned by the enclosing function
     try t.expect(owner.?.eql(a_id));
 }
 
+test "a reference inside a while loop's payload body is owned by the enclosing function, not the payload" {
+    var sem = try build(
+        \\const Iter = struct {
+        \\    fn next(self: *Iter) ?u32 {
+        \\        _ = self;
+        \\        return null;
+        \\    }
+        \\};
+        \\fn a() void {
+        \\    var it: Iter = .{};
+        \\    while (it.next()) |x| {
+        \\        b(x);
+        \\    }
+        \\}
+        \\fn b(x: u32) void { _ = x; }
+        \\
+    );
+    defer sem.deinit();
+
+    var owner_map = try OwnerMap.build(t.allocator, &sem);
+    defer owner_map.deinit(t.allocator);
+
+    const a_id = sem.symbols.getSymbolNamed("a").?;
+    const b_id = sem.symbols.getSymbolNamed("b").?;
+
+    const refs = sem.symbols.getReferences(b_id);
+    try t.expect(refs.len > 0);
+    const ref = sem.symbols.getReference(refs[0]);
+
+    const owner = owner_map.get(ref.node);
+    try t.expect(owner != null);
+    try t.expect(owner.?.eql(a_id));
+}
+
 test "a top-level declaration's initializer is owned by that declaration" {
     var sem = try build(
         \\fn compute() u32 { return 1; }
