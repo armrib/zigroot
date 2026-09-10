@@ -341,3 +341,30 @@ test "a local variable name reused across sibling blocks doesn't leak the shadow
     try t.expectEqual(@as(usize, 1), paths.len);
     try t.expectEqualStrings("tests/b_test.zig", paths[0]);
 }
+
+test "resolves an addImport value that's a field access into a helper's returned modules struct" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\const Mods = struct { foo: *std.Build.Module };
+        \\
+        \\fn wireModules(b: *std.Build) Mods {
+        \\    const foo = b.createModule(.{ .root_source_file = b.path("src/foo.zig") });
+        \\    return .{ .foo = foo };
+        \\}
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    const mods = wireModules(b);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("foo", mods.foo);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("foo").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("src/foo.zig", paths[0]);
+}

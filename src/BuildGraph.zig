@@ -111,6 +111,20 @@ pub fn parseInto(
     var bindings: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer bindings.deinit(gpa);
 
+    // "<var>.<field>" -> root_source_file path, for `mods.foo` where `mods`
+    // is bound to the result of a local helper that returns `.{ .foo = foo,
+    // ... }` (see `bindStructReturnFields`). Unlike `bindings`, both key and
+    // value are owned here.
+    var field_bindings: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer {
+        var fit = field_bindings.iterator();
+        while (fit.next()) |entry| {
+            gpa.free(entry.key_ptr.*);
+            gpa.free(entry.value_ptr.*);
+        }
+        field_bindings.deinit(gpa);
+    }
+
     var call_buf: [1]Ast.Node.Index = undefined;
     var struct_buf: [2]Ast.Node.Index = undefined;
 
@@ -137,6 +151,8 @@ pub fn parseInto(
                     try putBinding(gpa, &bindings, var_name, path);
                     continue;
                 }
+
+                try bindStructReturnFields(gpa, &tree, &bindings, &field_bindings, var_name, call, &struct_buf);
             }
 
             if (localFileImportPath(&tree, init_node)) |path_tok| {
@@ -151,7 +167,7 @@ pub fn parseInto(
             for (struct_init.ast.fields) |field_value| {
                 const name_tok = tree.firstToken(field_value) - 2;
                 if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "imports")) continue;
-                try scanImportsField(gpa, &tree, &bindings, result, field_value);
+                try scanImportsField(gpa, &tree, &bindings, &field_bindings, result, field_value);
             }
             continue;
         }
@@ -208,7 +224,7 @@ pub fn parseInto(
         errdefer gpa.free(import_name);
 
         const value_node = call.ast.params[1];
-        const rel_path = pathForBinding(&tree, &bindings, value_node) orelse {
+        const rel_path = pathForBinding(&tree, &bindings, &field_bindings, value_node) orelse {
             gpa.free(import_name);
             continue;
         };
@@ -444,6 +460,7 @@ fn scanImportsField(
     gpa: Allocator,
     tree: *const Ast,
     bindings: *const std.StringHashMapUnmanaged([]const u8),
+    field_bindings: *const std.StringHashMapUnmanaged([]const u8),
     result: *BuildGraph,
     field_value: Ast.Node.Index,
 ) !void {
@@ -468,7 +485,7 @@ fn scanImportsField(
                 if (tree.nodeTag(entry_field) != .string_literal) continue;
                 import_name = parseStringLiteral(gpa, tree, tree.nodeMainToken(entry_field)) catch null;
             } else if (std.mem.eql(u8, field_name, "module")) {
-                module_path = pathForBinding(tree, bindings, entry_field);
+                module_path = pathForBinding(tree, bindings, field_bindings, entry_field);
             }
         }
 
@@ -481,17 +498,103 @@ fn scanImportsField(
     }
 }
 
-/// Resolves `value_node` (an `addImport` second argument) to a
-/// `root_source_file` path, if it's a reference to a previously-recorded
-/// `createModule` binding.
+/// Resolves `value_node` (an `addImport` second argument, or an `.imports`
+/// entry's `.module` field) to a `root_source_file` path: either a bare
+/// identifier bound by a previously-recorded `createModule`/`b.path` binding
+/// in `bindings`, or a field access (`mods.foo`) into a struct a local
+/// helper function returned, recorded in `field_bindings` by
+/// `bindStructReturnFields`.
 fn pathForBinding(
     tree: *const Ast,
     bindings: *const std.StringHashMapUnmanaged([]const u8),
+    field_bindings: *const std.StringHashMapUnmanaged([]const u8),
     value_node: Ast.Node.Index,
 ) ?[]const u8 {
-    if (tree.nodeTag(value_node) != .identifier) return null;
-    const name = tree.tokenSlice(tree.nodeMainToken(value_node));
-    return bindings.get(name);
+    switch (tree.nodeTag(value_node)) {
+        .identifier => {
+            const name = tree.tokenSlice(tree.nodeMainToken(value_node));
+            return bindings.get(name);
+        },
+        .field_access => {
+            const base_node = tree.nodeData(value_node).node_and_token[0];
+            if (tree.nodeTag(base_node) != .identifier) return null;
+            const base = tree.tokenSlice(tree.nodeMainToken(base_node));
+            const field = fieldAccessName(tree, value_node) orelse return null;
+
+            var buf: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, field }) catch return null;
+            return field_bindings.get(key);
+        },
+        else => return null,
+    }
+}
+
+/// If `call` is a call to a locally-defined function (a plain identifier
+/// callee — e.g. `wireModules(b)`, not `b.method(...)`) whose body's last
+/// statement is `return .{ .foo = foo, ... };` — a helper that builds
+/// several related modules and returns them bundled in a struct (see
+/// issues/35) — binds `"<var_name>.<field>" -> path` in `field_bindings`
+/// for every returned field whose value resolves via `pathForBinding`
+/// against `bindings` as already accumulated by this scan. Relies on the
+/// helper being scanned (and its own `createModule`/`addModule` bindings
+/// recorded) before its call site is reached, true for the typical
+/// helper-defined-before-use style.
+fn bindStructReturnFields(
+    gpa: Allocator,
+    tree: *const Ast,
+    bindings: *const std.StringHashMapUnmanaged([]const u8),
+    field_bindings: *std.StringHashMapUnmanaged([]const u8),
+    var_name: []const u8,
+    call: Ast.full.Call,
+    struct_buf: *[2]Ast.Node.Index,
+) !void {
+    if (tree.nodeTag(call.ast.fn_expr) != .identifier) return;
+    const fn_name = tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr));
+    const fn_decl = findFnDecl(tree, fn_name) orelse return;
+
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    _ = tree.fullFnProto(&proto_buf, fn_decl) orelse return;
+    const body = tree.nodeData(fn_decl).node_and_node[1];
+
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, body) orelse return;
+    if (stmts.len == 0) return;
+    const last = stmts[stmts.len - 1];
+    if (tree.nodeTag(last) != .@"return") return;
+    const ret_expr = tree.nodeData(last).opt_node.unwrap() orelse return;
+
+    const struct_init = tree.fullStructInit(struct_buf, ret_expr) orelse return;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        const field_name = tree.tokenSlice(name_tok);
+        const path = pathForBinding(tree, bindings, field_bindings, field_value) orelse continue;
+
+        const key = try std.fmt.allocPrint(gpa, "{s}.{s}", .{ var_name, field_name });
+        errdefer gpa.free(key);
+        try putFieldBinding(gpa, field_bindings, key, path);
+    }
+}
+
+/// Records `key -> path` (a `dupe`d copy of `path`) in `field_bindings`,
+/// taking ownership of `key`. Unlike `putBinding`, both key and value are
+/// owned here — `field_bindings`' entries never borrow from `tree`.
+fn putFieldBinding(
+    gpa: Allocator,
+    field_bindings: *std.StringHashMapUnmanaged([]const u8),
+    key: []u8,
+    path: []const u8,
+) !void {
+    const dup_path = try gpa.dupe(u8, path);
+    errdefer gpa.free(dup_path);
+
+    const gop = try field_bindings.getOrPut(gpa, key);
+    if (gop.found_existing) {
+        gpa.free(key);
+        gpa.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = key;
+    }
+    gop.value_ptr.* = dup_path;
 }
 
 /// If `node` is a `field_access` (`lhs.name`), returns `name`.
