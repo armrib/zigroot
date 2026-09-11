@@ -38,5 +38,8 @@ import paths were rewritten for the flattened layout (`../Semantic.zig` →
   API.
 - `util/bitflags_test.zig`: the `Bitflags.format` expectation uses
   `@typeName` instead of a hard-coded module path.
+- `Semantic.zig`: re-exports `Error` (`Error.zig`) and `Location`
+  (`span.zig`) so the project layer can keep a file's diagnostics and
+  print them with line/column.
 
 Update this list whenever a file in this directory is edited.
