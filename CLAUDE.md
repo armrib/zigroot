@@ -27,7 +27,7 @@ tickets sitting in the directory, and don't just mark them done in place.
 zig build --fetch   # first time only, fetches ZLint via the package manager
 zig build test      # run the whole test suite
 zig build            # build zig-out/bin/zigroot
-zig build run -- --root src/root.zig --dir src   # build+run with args
+zig build run         # build+run against this repo's own build.zig
 ```
 
 Requires Zig 0.15.x — ZLint is pinned to a pre-0.16 commit (see
@@ -38,14 +38,18 @@ There's no dedicated single-test filter wired up in `build.zig`; run the
 full `zig build test` (it's fast — the corpus is this repo's own small
 `src/` tree plus synthetic fixtures inline in each `*_test.zig`).
 
-Run zigroot on itself:
+zigroot takes no arguments: run it from a directory containing a
+`build.zig` and it loads that `build.zig`'s `addExecutable`/`addLibrary`/
+`addTest` root modules as project roots automatically. Run zigroot on
+itself:
 ```sh
-zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
+zig-out/bin/zigroot
 ```
-Or against the ZLint dependency for a bigger real-world corpus (see any
-issue file's "Measured impact" section for the exact invocation pattern).
+Or `cd` into the ZLint dependency's checkout (under `zig-cache`/the global
+package cache) for a bigger real-world corpus, since it has its own
+`build.zig`.
 
-Exits non-zero if any orphan files are found.
+Exits non-zero if any orphan files or dead declarations are found.
 
 ## Architecture
 
@@ -55,8 +59,8 @@ Everything is layered on ZLint's per-file `Semantic`:
   `Semantic`, plus a derived `OwnerMap` and `SymbolGraph` built alongside it.
 - `Project` (`src/Project.zig`) loads root files, follows
   `@import("*.zig")` transitively via `ImportGraph`, and holds all `File`s.
-  Any `.zig` file under `--dir` that no root's import graph reaches is an
-  orphan file.
+  Any `.zig` file under the scanned directory that no root's import graph
+  reaches is an orphan file.
 - `SymbolId` (`src/SymbolId.zig`) pairs a ZLint `Symbol.Id` with
   its owning `FileId` — the project-wide symbol identity everything else
   is keyed on.
@@ -78,17 +82,19 @@ Everything is layered on ZLint's per-file `Semantic`:
   type's symbol so instance-method calls chain the same way static calls
   do. None of this is real type inference — it's reading what's already
   spelled out in the AST.
-- `BuildGraph` (`src/BuildGraph.zig`) is a syntactic scan of a
-  `build.zig`'s local module graph (`b.createModule` +
+- `BuildGraph` (`src/BuildGraph.zig`) is a syntactic scan of the
+  current directory's `build.zig` local module graph (`b.createModule` +
   `.addImport("name", ...)`), so named-module imports like
   `@import("storage")` resolve to a file instead of staying unresolved.
-  Enabled with `--build-zig <path>`; `b.dependency(...)` modules aren't
-  backed by a local file and stay unresolved.
+  Also extracts every `addExecutable`/`addLibrary`/`addTest` root module,
+  loaded as a project root; `b.dependency(...)` modules aren't backed by a
+  local file and stay unresolved.
 - `Roots` (`src/Roots.zig`) computes automatic reachability roots:
   each root file's `main`, every `export`ed symbol, every symbol
   referenced from a `test { ... }` block (ZLint gives `test` blocks no
-  symbol identity of their own), and — under `--library` — every `pub`
-  symbol.
+  symbol identity of their own), and — under `PublicPolicy.root`, chosen
+  automatically when `build.zig` defines a library and no executable —
+  every `pub` symbol.
 - `Reachability` (`src/Reachability.zig`) is a BFS over
   `SymbolGraph` + `Resolver`'s cross-file edges starting from `Roots`;
   `deadSymbols` is everything the BFS never reaches. `extern` declarations
@@ -97,9 +103,11 @@ Everything is layered on ZLint's per-file `Semantic`:
   edges `Reachability` trusts, so a cycle of mutually-referencing-but-
   globally-dead declarations is reported as one finding instead of N.
 
-`main.zig` is the CLI: it wires `--root`/`--dir`/`--library`/`--build-zig`
-into `Project` + `Roots` + `Reachability`/`Scc`, and prints orphan files
-then dead symbols (grouping cyclic components).
+`main.zig` is the CLI: it takes no arguments, loading the current
+directory's `build.zig` into `Project` + `Roots` (inferring library vs.
+executable policy from whether `build.zig` defines a library and no
+executable) + `Reachability`/`Scc`, and prints orphan files then dead
+symbols (grouping cyclic components).
 
 ## Conventions
 

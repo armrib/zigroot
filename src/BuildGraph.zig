@@ -53,6 +53,19 @@ test_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 /// of reporting the whole thing orphaned. Owned.
 exe_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 
+/// Whether a `b.addExecutable(...)` call was found anywhere in the scan,
+/// regardless of whether its root module's path could be resolved — used
+/// (together with `has_library`) to infer executable vs. library
+/// reachability semantics when no policy is given explicitly.
+has_executable: bool = false,
+
+/// Whether a `b.addLibrary(...)` call was found anywhere in the scan,
+/// regardless of whether its root module's path could be resolved. A
+/// `build.zig` that defines a library and no executable is the signal
+/// used to default to library mode (every `pub` symbol is reachable API)
+/// instead of executable mode.
+has_library: bool = false,
+
 pub const empty: BuildGraph = .{};
 
 /// Resolves a cross-file helper call site's callee (`<local-file-alias>.
@@ -261,6 +274,11 @@ pub fn parseInto(
         }
 
         if (std.mem.eql(u8, field, "addExecutable") or std.mem.eql(u8, field, "addLibrary")) {
+            if (std.mem.eql(u8, field, "addExecutable")) {
+                result.has_executable = true;
+            } else {
+                result.has_library = true;
+            }
             if (call.ast.params.len >= 1) {
                 if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
                     errdefer gpa.free(path);

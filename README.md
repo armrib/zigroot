@@ -26,12 +26,13 @@ Status: Phase 0-16. Implemented so far:
   mapping every symbol's already-resolved incoming references through
   `OwnerMap` (`src/SymbolGraph.zig`). `File` builds one alongside
   its `semantic` and `OwnerMap`.
-- `Roots`: automatic reachability roots — each `--root` file's `main`
+- `Roots`: automatic reachability roots — each root file's `main`
   (`executable_entry`), every `export`ed symbol (`.export`), every symbol
   referenced from a `test { ... }` block (`.test`, since ZLint gives `test`
   blocks no symbol identity of their own to make a root out of directly),
-  and, under `PublicPolicy.root` (library mode, `--library`), every `pub`
-  symbol (`.public_api`) (`src/Roots.zig`).
+  and, under `PublicPolicy.root` (library mode, auto-detected when
+  `build.zig` defines a library and no executable), every `pub` symbol
+  (`.public_api`) (`src/Roots.zig`).
 - `extern` declarations are excluded from `deadSymbols` — their
   implementation lives outside the project, so local reachability can't
   justify calling them dead (`src/Reachability.zig`).
@@ -53,12 +54,13 @@ Status: Phase 0-16. Implemented so far:
   as one finding instead of N (`src/Scc.zig`). The CLI groups a
   dead symbol's whole cyclic component into one `cycle of N
   declaration(s)...` report.
-- `BuildGraph`: a syntactic scan of a `build.zig`'s local module graph
-  (`b.createModule(...)` + `.addImport("name", ...)` bindings), so
-  named-module imports like `@import("storage")` resolve to their file
-  instead of staying unresolved (`src/BuildGraph.zig`). Enabled
-  with `--build-zig <path>`; dependency modules (`b.dependency(...)`) stay
-  unresolved, since they aren't backed by a local file.
+- `BuildGraph`: a syntactic scan of the current directory's `build.zig`
+  local module graph (`b.createModule(...)` + `.addImport("name", ...)`
+  bindings), so named-module imports like `@import("storage")` resolve to
+  their file instead of staying unresolved (`src/BuildGraph.zig`). Also
+  extracts every `addExecutable`/`addLibrary`/`addTest` root module as a
+  project root. Dependency modules (`b.dependency(...)`) stay unresolved,
+  since they aren't backed by a local file.
 - `DynamicField` now also resolves `@field(...)` across an `@import`
   boundary (`@field(storage, "start")`), via the same target-file
   export-matching `Resolver` uses for `storage.start()`
@@ -123,26 +125,18 @@ zig build
 ## Run
 
 ```sh
-zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
+cd path/to/some/project   # a directory with a build.zig
+zigroot
 ```
 
-With no `--root`/`--build-zig` given, zigroot looks for a `build.zig` in the
-current directory and, if found, uses it automatically: its
-`addExecutable`/`addLibrary`/`addTest` root modules become the roots (same as
-`--build-zig`), and `.` is scanned for orphans. If no `build.zig` is found,
-`--root` is required.
-
-- `--root <file.zig>`: a project entry point, followed transitively through
-  `@import("*.zig")`. Repeatable.
-- `--dir <path>`: directory to scan for orphan `.zig` files (default `.`).
-- `--library`: treat every `pub` symbol as reachable library API (default:
-  executable mode, where `pub` alone doesn't make a symbol a root).
-- `--build-zig <build.zig>`: resolve named-module `@import(...)`s that
-  `build.zig` wires up locally via `b.createModule(...)` +
-  `.addImport(...)`, instead of leaving them unresolved. Also loads its
-  `addExecutable`/`addLibrary`/`addTest` root modules as roots.
-
-Exits non-zero if any orphan files are found.
+zigroot takes no arguments. Run it from a directory containing a
+`build.zig`; it loads that `build.zig`'s `addExecutable`/`addLibrary`/
+`addTest` root modules as project roots, resolves the named-module
+`@import(...)`s it wires up via `b.createModule(...)` + `.addImport(...)`,
+and scans `.` for orphan `.zig` files. A `build.zig` that defines a library
+and no executable is analyzed in library mode (every `pub` symbol counts as
+reachable API); otherwise `pub` alone doesn't make a symbol a root. Exits
+non-zero if any orphan files or dead declarations are found.
 
 ## Layout
 
