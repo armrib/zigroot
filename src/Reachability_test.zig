@@ -683,3 +683,51 @@ test "parameters, locals and fields are never findings of their own" {
     }
     try t.expectEqual(@as(usize, 0), dead.items.len);
 }
+
+test "a decl literal (.init(...) / return .empty / field default) reaches the member of the expected type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Roots = struct {
+        \\    n: u32 = 0,
+        \\    pub const empty: Roots = .{};
+        \\    pub const other: Roots = .{ .n = 1 };
+        \\    pub fn init(n: u32) Roots { return .{ .n = n }; }
+        \\    pub fn make() Roots { return .empty; }
+        \\    pub fn unusedInit() Roots { return .{}; }
+        \\};
+        \\const Holder = struct {
+        \\    roots: Roots = .init(2),
+        \\};
+        \\pub fn main() void {
+        \\    const r = Roots.make();
+        \\    _ = r;
+        \\    var h: Holder = .{};
+        \\    _ = &h;
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 2), dead.items.len);
+    for (dead.items) |d| {
+        const name = project.symbol(d.id).name;
+        try t.expect(std.mem.eql(u8, name, "other") or std.mem.eql(u8, name, "unusedInit"));
+    }
+}

@@ -22,6 +22,7 @@ const Project = @import("Project.zig");
 const Roots = @import("Roots.zig");
 const SymbolGraph = @import("SymbolGraph.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
+const FieldChain = @import("FieldChain.zig");
 
 const Reachability = @This();
 
@@ -189,6 +190,12 @@ pub fn isReportable(project: *const Project, id: SymbolId) bool {
     if (sym.name.len == 0 or std.mem.eql(u8, sym.name, "_")) return false;
     if (sym.flags.s_fn_param or sym.flags.s_payload or sym.flags.s_catch_param or sym.flags.s_member) return false;
     if (!(sym.flags.s_fn or sym.flags.s_const or sym.flags.s_variable)) return false;
+    // A plain alias (`const t = std.testing;`, `const helper =
+    // @import("helper.zig");`) that *is* referenced — necessarily only from
+    // test blocks, or it would be reachable — is test scaffolding, not
+    // code: deleting it breaks the tests and removes nothing. What it
+    // names is still reported if nothing else reaches it.
+    if (FieldChain.valueAliasInit(&f.semantic, id.local, .{}) != null and f.semantic.symbols.getReferences(id.local).len > 0) return false;
     // A container body's scope carries `s_block` alongside `s_struct`/...,
     // so only `s_function` (the body of a fn) rules a scope out directly;
     // a plain block inside a function has none of the container flags.

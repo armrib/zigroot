@@ -16,6 +16,30 @@ fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     try f.writeAll(contents);
 }
 
+const SymbolId = @import("SymbolId.zig").SymbolId;
+
+/// The kind of the edge to `to` among `targets`, if there is one. With
+/// several (a `.definite` hop and a `.possible` re-derivation of the same
+/// target), the most confident wins.
+fn edgeTo(targets: []const SymbolGraph.Target, to: SymbolId) ?SymbolGraph.EdgeKind {
+    var best: ?SymbolGraph.EdgeKind = null;
+    for (targets) |target| {
+        if (!target.to.eql(to)) continue;
+        if (best == null or @intFromEnum(target.kind) < @intFromEnum(best.?)) best = target.kind;
+    }
+    return best;
+}
+
+/// Every edge among `targets` that isn't to the file root (an `@import`
+/// binding's alias target, edged alongside whatever it was used to reach).
+fn nonRootEdgeCount(targets: []const SymbolGraph.Target) usize {
+    var n: usize = 0;
+    for (targets) |target| {
+        if (@intFromEnum(target.to.local) != 0) n += 1;
+    }
+    return n;
+}
+
 test "storage.start() produces a cross-file edge to storage.zig's start" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -52,8 +76,8 @@ test "storage.start() produces a cross-file edge to storage.zig's start" {
     const start_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("start").?;
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
-    try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = start_sym }));
+    try t.expectEqual(@as(usize, 1), nonRootEdgeCount(outgoing));
+    try t.expectEqual(SymbolGraph.EdgeKind.definite, edgeTo(outgoing, .{ .file = storage_id, .local = start_sym }).?);
 }
 
 test "storage.Inner.run() chains a cross-file edge through a nested container" {
@@ -92,10 +116,12 @@ test "storage.Inner.run() chains a cross-file edge through a nested container" {
         if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
     } else unreachable;
     const run_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("run").?;
+    const inner_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("Inner").?;
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
-    try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = run_sym }));
+    try t.expectEqual(SymbolGraph.EdgeKind.definite, edgeTo(outgoing, .{ .file = storage_id, .local = run_sym }).?);
+    // The container hopped through is as used as the member reached.
+    try t.expect(edgeTo(outgoing, .{ .file = storage_id, .local = inner_sym }) != null);
 }
 
 test "s.run() on a cross-file-typed variable produces a cross-file .possible edge" {
@@ -536,9 +562,7 @@ test "@field(storage, \"Inner\").run() chains a cross-file @field hop into a fur
     const run_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("run").?;
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
-    try t.expectEqual(@as(usize, 1), outgoing.len);
-    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = run_sym }));
-    try t.expectEqual(SymbolGraph.EdgeKind.possible, outgoing[0].kind);
+    try t.expectEqual(SymbolGraph.EdgeKind.possible, edgeTo(outgoing, .{ .file = storage_id, .local = run_sym }).?);
 }
 
 test "@field(storage, name) with a runtime name produces cross-file .unknown edges to every export" {
@@ -579,9 +603,9 @@ test "@field(storage, name) with a runtime name produces cross-file .unknown edg
     const stop_sym = project.file(storage_id).semantic.symbols.getSymbolNamed("stop").?;
 
     const outgoing = cross_file.outgoing(.{ .file = main_id, .local = main_sym });
-    try t.expectEqual(@as(usize, 2), outgoing.len);
-    for (outgoing) |target| try t.expectEqual(SymbolGraph.EdgeKind.unknown, target.kind);
-    try t.expect(outgoing[0].to.eql(.{ .file = storage_id, .local = start_sym }) or outgoing[0].to.eql(.{ .file = storage_id, .local = stop_sym }));
+    try t.expectEqual(@as(usize, 2), nonRootEdgeCount(outgoing));
+    try t.expectEqual(SymbolGraph.EdgeKind.unknown, edgeTo(outgoing, .{ .file = storage_id, .local = start_sym }).?);
+    try t.expectEqual(SymbolGraph.EdgeKind.unknown, edgeTo(outgoing, .{ .file = storage_id, .local = stop_sym }).?);
 }
 
 test "a symbol only reachable across an @import is not reported dead" {
@@ -1035,4 +1059,291 @@ test "an instance method reached through an if-payload capture of a cross-file-t
 
     try t.expect(reachability.isReachable(.{ .file = meta_log_id, .local = append_sym }));
     try t.expect(!reachability.isReachable(.{ .file = meta_log_id, .local = unused_sym }));
+}
+
+test "an alias of a re-exported @import (const Project = lib.Project) resolves instance calls and decl literals through it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const lib = @import("lib.zig");
+        \\const Project = lib.Project;
+        \\pub fn main() void {
+        \\    var project: Project = .init(1);
+        \\    defer project.deinit();
+        \\    project.load();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "lib.zig",
+        \\pub const Project = @import("Project.zig");
+        \\pub const Unused = @import("Unused.zig");
+        \\
+    );
+    try writeFile(tmp.dir, "Project.zig",
+        \\const Project = @This();
+        \\n: u32,
+        \\pub fn init(n: u32) Project { return .{ .n = n }; }
+        \\pub fn deinit(self: *Project) void { _ = self; }
+        \\pub fn load(self: *Project) void { _ = self; }
+        \\pub fn unused(self: *Project) void { _ = self; }
+        \\
+    );
+    try writeFile(tmp.dir, "Unused.zig",
+        \\pub fn never() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    var found_unused = false;
+    var found_never = false;
+    for (dead.items) |d| {
+        const name = project.symbol(d.id).name;
+        if (std.mem.eql(u8, name, "unused")) found_unused = true;
+        if (std.mem.eql(u8, name, "never")) found_never = true;
+        try t.expect(!std.mem.eql(u8, name, "init"));
+        try t.expect(!std.mem.eql(u8, name, "deinit"));
+        try t.expect(!std.mem.eql(u8, name, "load"));
+        try t.expect(!std.mem.eql(u8, name, "Project"));
+    }
+    try t.expect(found_unused);
+    try t.expect(found_never);
+}
+
+test "a parameter typed as an @import binding (file-as-struct) chains method calls into that file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Project = @import("Project.zig");
+        \\fn work(project: *const Project) void {
+        \\    project.run();
+        \\}
+        \\pub fn main() void {
+        \\    var p: Project = .{};
+        \\    work(&p);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "Project.zig",
+        \\const Project = @This();
+        \\n: u32 = 0,
+        \\pub fn run(self: *const Project) void { _ = self; }
+        \\pub fn idle(self: *const Project) void { _ = self; }
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("idle", project.symbol(dead.items[0].id).name);
+}
+
+test "a variable initialized from a call-and-field chain across files takes the declared type of what the chain lands on" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Project = @import("Project.zig");
+        \\fn work(project: *const Project) void {
+        \\    const semantic = &project.file(0).semantic;
+        \\    semantic.getBinding("x");
+        \\    const name = project.symbol(0).name;
+        \\    _ = name;
+        \\}
+        \\pub fn main() void {
+        \\    var p: Project = .{};
+        \\    work(&p);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "Project.zig",
+        \\const Project = @This();
+        \\const File = @import("File.zig");
+        \\const Semantic = @import("Semantic.zig");
+        \\files: [1]File = undefined,
+        \\pub fn file(self: *const Project, i: usize) *const File { return &self.files[i]; }
+        \\pub fn symbol(self: *const Project, i: usize) *const Semantic.Symbol { _ = self; _ = i; return undefined; }
+        \\
+    );
+    try writeFile(tmp.dir, "File.zig",
+        \\const Semantic = @import("Semantic.zig");
+        \\semantic: Semantic,
+        \\
+    );
+    try writeFile(tmp.dir, "Semantic.zig",
+        \\pub const Symbol = @import("Symbol.zig");
+        \\pub fn getBinding(self: *const @This(), name: []const u8) void { _ = self; _ = name; }
+        \\pub fn resolveBinding(self: *const @This()) void { _ = self; }
+        \\
+    );
+    try writeFile(tmp.dir, "Symbol.zig",
+        \\name: []const u8,
+        \\pub fn unusedMethod(self: *const @This()) void { _ = self; }
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(t.allocator);
+    for (dead.items) |d| try names.append(t.allocator, project.symbol(d.id).name);
+
+    try t.expectEqual(@as(usize, 2), names.items.len);
+    for (names.items) |name| {
+        try t.expect(std.mem.eql(u8, name, "resolveBinding") or std.mem.eql(u8, name, "unusedMethod"));
+    }
+}
+
+test "a field typed through an alias of an import's export (owner: []Symbol.Id.Optional) chains method calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Semantic = @import("Semantic.zig");
+        \\const Symbol = Semantic.Symbol;
+        \\const Map = struct {
+        \\    owner: []Symbol.Id.Optional,
+        \\    pub fn get(self: *const Map, i: usize) ?u32 {
+        \\        return self.owner[i].unwrap();
+        \\    }
+        \\};
+        \\pub fn main() void {
+        \\    var m: Map = .{ .owner = &.{} };
+        \\    _ = m.get(0);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "Semantic.zig",
+        \\pub const Symbol = @import("Symbol.zig");
+        \\
+    );
+    try writeFile(tmp.dir, "Symbol.zig",
+        \\pub const Id = struct {
+        \\    pub const Optional = enum(u32) {
+        \\        none = 0,
+        \\        _,
+        \\        pub fn unwrap(self: Optional) ?u32 { return if (self == .none) null else @intFromEnum(self); }
+        \\        pub fn other(self: Optional) void { _ = self; }
+        \\    };
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("other", project.symbol(dead.items[0].id).name);
+}
+
+test "a bare use of a value alias reaches what it names, and an intermediate hop is reached too" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const util = @import("util.zig");
+        \\const NominalId = util.NominalId;
+        \\const Id = NominalId(u32);
+        \\const Outer = struct {
+        \\    pub const Inner = struct {
+        \\        pub fn run() void {}
+        \\    };
+        \\};
+        \\pub fn main() void {
+        \\    var id: Id = .{ .raw = 1 };
+        \\    _ = &id;
+        \\    Outer.Inner.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "util.zig",
+        \\pub fn NominalId(comptime T: type) type {
+        \\    return struct { raw: T };
+        \\}
+        \\pub fn Unused(comptime T: type) type {
+        \\    return struct { raw: T };
+        \\}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("Unused", project.symbol(dead.items[0].id).name);
 }

@@ -75,8 +75,33 @@ pub const StuckCall = struct {
     kind: Kind,
 };
 
+/// Phase 30: mirrors `StuckHop`, for a hop off a plain value alias —
+/// `const Project = zigroot.Project;`, `const FileId =
+/// @import("FileId.zig").FileId;`, `const Self = Outer.Inner;` — a `const`
+/// whose initializer is an identifier, a `.field` chain, or an `@import`
+/// call (optionally field-accessed). Such a binding has no exports of its
+/// own; what it *names* does, and naming it may cross any number of
+/// `@import` boundaries, which only `Resolver` can follow.
+pub const StuckAlias = struct {
+    /// The alias symbol (declared in `symbols`) the walk stopped on.
+    symbol: Semantic.Symbol.Id,
+    node: Semantic.Ast.Node.Index,
+    kind: Kind,
+};
+
+/// Upper bound on the intermediate hops one `resolveChain` segment
+/// records in `ChainWalk.visited`; longer chains still resolve, only the
+/// hops past this many go unrecorded.
+pub const max_visited = 16;
+
 pub const ChainWalk = struct {
     result: ChainResult,
+    /// Every symbol the walk passed *through* between `start` and
+    /// `result` (exclusive of both), in order — `Inner` in
+    /// `Outer.Inner.run()`, `symbol` in `project.symbol(id).name`. Each is
+    /// as used as the final target is, so callers edge them all.
+    visited: [max_visited]Semantic.Symbol.Id = undefined,
+    visited_len: usize = 0,
     /// Set only if the walk stopped at a runtime-named `@field(...)` hop.
     unknown: ?Unknown = null,
     /// Set only if the walk stopped because the next hop's container needs
@@ -88,6 +113,13 @@ pub const ChainWalk = struct {
     /// type needs a cross-file resolution — see `Resolver`, mirroring
     /// `stuck` above.
     stuck_call: ?StuckCall = null,
+    /// Set only if the walk stopped on a value alias whose target may lie
+    /// in another file — see `Resolver`, mirroring `stuck` above.
+    stuck_alias: ?StuckAlias = null,
+
+    pub fn visitedSlice(walk: *const ChainWalk) []const Semantic.Symbol.Id {
+        return walk.visited[0..walk.visited_len];
+    }
 };
 
 /// Walks `start` (declared in `symbols`, first referenced at `start_node` in
@@ -97,7 +129,22 @@ pub const ChainWalk = struct {
 /// container (a runtime-named `@field`, returned via `.unknown` instead of
 /// being chased further — it names a set of targets, not one).
 pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *const OwnerMap, start: Semantic.Symbol.Id, start_node: Semantic.Ast.Node.Index, start_kind: Kind) ChainWalk {
-    var current: ChainResult = .{ .symbol = start, .node = start_node, .kind = start_kind };
+    var walk: ChainWalk = .{ .result = .{ .symbol = start, .node = start_node, .kind = start_kind } };
+    walk.result = resolveChainInner(ast, symbols, owner_map, &walk);
+    return walk;
+}
+
+/// Records `current` as passed through, once the walk moves on from it.
+fn visit(walk: *ChainWalk, current: ChainResult, start: Semantic.Symbol.Id) void {
+    if (current.symbol == start) return;
+    if (walk.visited_len >= max_visited) return;
+    walk.visited[walk.visited_len] = current.symbol;
+    walk.visited_len += 1;
+}
+
+fn resolveChainInner(ast: *const Semantic, symbols: *const Semantic, owner_map: *const OwnerMap, walk: *ChainWalk) ChainResult {
+    const start = walk.result.symbol;
+    var current = walk.result;
     while (true) {
         // `current.symbol` may itself be a container field or variable
         // rather than a container/type — e.g. after hopping onto `foo` in
@@ -116,11 +163,24 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
 
         if (fieldAccessName(ast, current.node)) |name| {
             if (findExport(symbols, owner_map, container, name)) |next| {
+                visit(walk, current, start);
                 current = .{ .symbol = next, .node = ast.node_links.getParent(current.node).?, .kind = hop_kind };
                 continue;
             }
-            if (container == current.symbol and InstanceType.crossFileRoot(symbols, owner_map, current.symbol) != null) {
-                return .{ .result = current, .stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible } };
+            if (container == current.symbol and hasUnresolvedDeclaredType(symbols, owner_map, current.symbol)) {
+                walk.stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible };
+                return current;
+            }
+            // Phase 30: the container this hop needs is a value alias —
+            // either `current.symbol` itself (`Project.init`, `Project`
+            // being `const Project = zigroot.Project`) or the declared
+            // type it resolved to (`self.import_graph.deinit()`, where
+            // `import_graph: ImportGraph` and `ImportGraph` is an `@import`
+            // binding). `Resolver` finishes it either way.
+            if (valueAliasInit(symbols, container, .{ .allow_call = true }) != null) {
+                if (container != current.symbol) visit(walk, current, start);
+                walk.stuck_alias = .{ .symbol = container, .node = current.node, .kind = hop_kind };
+                return current;
             }
             break;
         }
@@ -139,10 +199,12 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
             // below using it directly, same as the same-file `type_resolved
             // != null` case always has.
             if (type_resolved == null and container == current.symbol) {
-                if (InstanceType.crossFileRoot(symbols, owner_map, current.symbol) != null) {
-                    return .{ .result = current, .stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible } };
+                if (hasUnresolvedDeclaredType(symbols, owner_map, current.symbol)) {
+                    walk.stuck = .{ .symbol = current.symbol, .node = current.node, .kind = .possible };
+                    return current;
                 }
             }
+            if (container != current.symbol) visit(walk, current, start);
             current = .{ .symbol = container, .node = access_node, .kind = hop_kind };
             continue;
         }
@@ -157,11 +219,17 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
             if (symbols.symbols.get(container).flags.s_fn) {
                 if (InstanceType.fnReturnTypeNode(symbols, container)) |return_node| {
                     if (InstanceType.resolveTypeExpr(symbols, owner_map, return_node)) |ret_sym| {
+                        visit(walk, current, start);
                         current = .{ .symbol = ret_sym, .node = call_node, .kind = .possible };
                         continue;
                     }
-                    if (InstanceType.fieldAccessRoot(symbols, owner_map, return_node) != null) {
-                        return .{ .result = current, .stuck_call = .{ .fn_symbol = container, .call_node = call_node, .kind = .possible } };
+                    // A return type that's a `.field` chain into another
+                    // file, or a bare alias/`@import` binding (`*const
+                    // File`, `File` being `@import("File.zig")`): either
+                    // way `Resolver` resolves the return type and resumes.
+                    if (InstanceType.fieldAccessRoot(symbols, owner_map, return_node) != null or returnTypeIsAlias(symbols, owner_map, return_node)) {
+                        walk.stuck_call = .{ .fn_symbol = container, .call_node = call_node, .kind = .possible };
+                        return current;
                     }
                 }
             }
@@ -169,18 +237,38 @@ pub fn resolveChain(ast: *const Semantic, symbols: *const Semantic, owner_map: *
 
         if (DynamicField.resolve(ast, symbols, container, current.node)) |resolution| switch (resolution) {
             .possible => |target| {
+                visit(walk, current, start);
                 current = .{ .symbol = target, .node = ast.node_links.getParent(current.node).?, .kind = .possible };
                 continue;
             },
-            .unknown => |exports| return .{
-                .result = current,
-                .unknown = .{ .exports = exports, .node = ast.node_links.getParent(current.node).? },
+            .unknown => |exports| {
+                walk.unknown = .{ .exports = exports, .node = ast.node_links.getParent(current.node).? };
+                return current;
             },
         };
 
         break;
     }
-    return .{ .result = current };
+    return current;
+}
+
+/// Whether `sym_id` has a declared type written down at all
+/// (`InstanceType.declaredTypeNodes`) — given the caller already found it
+/// doesn't resolve same-file, that means the type expression crosses an
+/// `@import` boundary or goes through an alias, which only `Resolver` can
+/// follow (Phase 30 generalizes the earlier `crossFileRoot`-only check:
+/// `owner: []Symbol.Id.Optional` with `Symbol` an alias is stuck too).
+fn hasUnresolvedDeclaredType(symbols: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) bool {
+    if (InstanceType.crossFileRoot(symbols, owner_map, sym_id) != null) return true;
+    return InstanceType.declaredTypeNodes(symbols, sym_id).slice().len > 0;
+}
+
+/// Whether `return_node` (already known not to resolve same-file to a
+/// container) names, after the usual pointer/optional unwrapping, a value
+/// alias — so the callee's return type is only resolvable via `Resolver`.
+fn returnTypeIsAlias(symbols: *const Semantic, owner_map: *const OwnerMap, return_node: Semantic.Ast.Node.Index) bool {
+    const ty = InstanceType.resolveTypeExpr(symbols, owner_map, return_node) orelse return false;
+    return valueAliasInit(symbols, ty, .{ .allow_call = true }) != null;
 }
 
 /// If `node` is used as the base of a field access (`node.field`), that
@@ -295,6 +383,55 @@ fn isContainerMember(symbols: *const Semantic, decl: Semantic.Ast.Node.Index) bo
         }
     }
     return false;
+}
+
+pub const ValueChainOptions = struct {
+    /// Also accept a call (`util.Bitflags(Flags)`, `project.file(id)`) at
+    /// any point of the chain: the value is then whatever the callee's
+    /// declared return type names. Off for callers that only want a
+    /// *renaming* (`const Project = zigroot.Project`), not a computed
+    /// value.
+    allow_call: bool = false,
+};
+
+/// If `sym_id` is a plain value alias — a `const`/`var` whose initializer
+/// is a bare identifier, a `.field` chain, or an `@import(...)` call
+/// (optionally field-accessed: `@import("x.zig").Y`), possibly wrapped in
+/// `&`/`try`/parens — that initializer node. With `allow_call`, a call
+/// anywhere in the chain is accepted too. `null` for a container
+/// declaration, a function, a parameter, a field, or a variable
+/// initialized any other way (a literal, `@This()`).
+pub fn valueAliasInit(symbols: *const Semantic, sym_id: Semantic.Symbol.Id, options: ValueChainOptions) ?Semantic.Ast.Node.Index {
+    const symbol = symbols.symbols.get(sym_id);
+    if (!symbol.flags.s_variable or symbol.flags.s_fn_param or symbol.flags.s_member or symbol.flags.s_payload) return null;
+    if (symbol.flags.intersects(Semantic.Symbol.Flags.s_container)) return null;
+
+    const ast = &symbols.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    return if (isValueChain(symbols, init_node, options)) init_node else null;
+}
+
+/// Whether `node` is an identifier, a `.field` chain, or an `@import(...)`
+/// call, with any number of `.field` hops off any of those, optionally
+/// wrapped in `&`, `try`, parens, `.*` or `.?`; with `allow_call`, calls
+/// too.
+pub fn isValueChain(symbols: *const Semantic, node: Semantic.Ast.Node.Index, options: ValueChainOptions) bool {
+    const ast = &symbols.parse.ast;
+    return switch (ast.nodeTag(node)) {
+        .identifier => true,
+        .field_access => isValueChain(symbols, ast.nodeData(node).node_and_token[0], options),
+        .builtin_call_two, .builtin_call_two_comma => std.mem.eql(u8, symbols.tokenSlice(ast.nodeMainToken(node)), "@import"),
+        .address_of, .@"try", .deref => isValueChain(symbols, ast.nodeData(node).node, options),
+        .grouped_expression, .unwrap_optional => isValueChain(symbols, ast.nodeData(node).node_and_token[0], options),
+        .call, .call_comma, .call_one, .call_one_comma => blk: {
+            if (!options.allow_call) break :blk false;
+            var buf: [1]Semantic.Ast.Node.Index = undefined;
+            const call = ast.fullCall(&buf, node) orelse break :blk false;
+            break :blk isValueChain(symbols, call.ast.fn_expr, options);
+        },
+        else => false,
+    };
 }
 
 /// If `container` is a `const X = @This();` alias, the symbol of the
