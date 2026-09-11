@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const FileId = @import("FileId.zig").FileId;
 const File = @import("File.zig");
@@ -261,7 +261,7 @@ pub fn file(self: *const Project, id: FileId) *const File {
 }
 
 /// Resolves a project-wide `SymbolId` to the ZLint symbol it identifies.
-pub fn symbol(self: *const Project, id: SymbolId) *const zlint.Semantic.Symbol {
+pub fn symbol(self: *const Project, id: SymbolId) *const Semantic.Symbol {
     return self.file(id.file).semantic.symbols.get(id.local);
 }
 

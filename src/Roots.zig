@@ -38,7 +38,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const Project = @import("Project.zig");
 const FileId = @import("FileId.zig").FileId;
@@ -48,7 +48,6 @@ const DynamicField = @import("DynamicField.zig");
 const InstanceType = @import("InstanceType.zig");
 const Resolver = @import("Resolver.zig");
 const OwnerMap = @import("OwnerMap.zig");
-const Semantic = zlint.Semantic;
 const Scope = Semantic.Scope;
 
 /// Every file's top-level declarations are exported from this symbol.

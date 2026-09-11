@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const File = @import("File.zig");
 const Project = @import("Project.zig");
@@ -176,10 +176,10 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
 /// (which wraps a `fn_proto*` node together with a body) and anything else
 /// for a bare function-type expression (which stands alone, e.g. as a
 /// `container_field`'s type or wrapped in pointer/optional syntax).
-fn isBareFnTypeParam(f: *const File, decl: zlint.Semantic.Ast.Node.Index) bool {
+fn isBareFnTypeParam(f: *const File, decl: Semantic.Ast.Node.Index) bool {
     const ast = &f.semantic.parse.ast;
     if (ast.nodeTag(decl) == .fn_decl) return false;
-    var cur: ?zlint.Semantic.Ast.Node.Index = decl;
+    var cur: ?Semantic.Ast.Node.Index = decl;
     while (cur) |c| : (cur = f.semantic.node_links.getParent(c)) {
         switch (ast.nodeTag(c)) {
             .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {

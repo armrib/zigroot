@@ -25,8 +25,7 @@
 //! file's `Semantic` (with its root symbol) as `symbols`/`container`.
 
 const std = @import("std");
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 
 pub const Resolution = union(enum) {
     /// Resolved to one specific export, from a comptime-known field name.

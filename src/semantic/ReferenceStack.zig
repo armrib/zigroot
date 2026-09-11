@@ -40,5 +40,5 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-const Semantic = @import("../Semantic.zig");
+const Semantic = @import("Semantic.zig");
 const Reference = Semantic.Reference;

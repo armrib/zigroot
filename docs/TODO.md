@@ -18,18 +18,18 @@ tests pass (20/20). Steps are ordered so each one shrinks that number and
 can be shipped on its own. Each step lists the files to touch, the ZLint
 API it relies on, and the test that proves it.
 
-ZLint (vendored at `vendor/zlint`, commit `8cbbb1c`) is the semantic
-layer. Relevant public surface:
+The semantic layer is our copy of ZLint's (`src/semantic/`, from commit
+`8cbbb1c`, see `src/semantic/UPSTREAM.md`). Relevant public surface:
 
 | What | Where |
 | --- | --- |
-| Symbol flags `s_fn`, `s_fn_param`, `s_payload`, `s_member`, `s_variable`, `s_const`, `s_extern`, `s_export`, `s_struct`, `s_enum`, `s_union`, `s_error` | `src/Semantic/Symbol.zig` `Flags` |
-| `Symbol.scope`, `Symbol.decl`, `Symbol.visibility` (`.public`/`.private`), `Symbol.members`, `Symbol.exports` | `src/Semantic/Symbol.zig` |
-| Scope flags `s_top`, `s_function`, `s_struct`, `s_enum`, `s_union`, `s_block`, `s_test`, `s_comptime`; `Scope.parent`; `Scope.Tree.getScope`, `iterParents` | `src/Semantic/Scope.zig` |
-| `Reference.symbol` (optional, `.none` when unresolved), `Reference.scope`, `Reference.node`, `Reference.identifier` | `src/Semantic/Reference.zig` |
-| `ModuleRecord.ImportEntry{ specifier, node, kind }` | `src/Semantic/ModuleRecord.zig` |
-| `Semantic.nodeSpan`, `Semantic.nodeSlice`, `Semantic.getBinding`, `Semantic.resolveBinding` | `src/Semantic.zig` |
-| `visitFieldAccess` is a `// TODO: record references` stub | `src/Semantic/Builder.zig:850` |
+| Symbol flags `s_fn`, `s_fn_param`, `s_payload`, `s_member`, `s_variable`, `s_const`, `s_extern`, `s_export`, `s_struct`, `s_enum`, `s_union`, `s_error` | `src/semantic/Symbol.zig` `Flags` |
+| `Symbol.scope`, `Symbol.decl`, `Symbol.visibility` (`.public`/`.private`), `Symbol.members`, `Symbol.exports` | `src/semantic/Symbol.zig` |
+| Scope flags `s_top`, `s_function`, `s_struct`, `s_enum`, `s_union`, `s_block`, `s_test`, `s_comptime`; `Scope.parent`; `Scope.Tree.getScope`, `iterParents` | `src/semantic/Scope.zig` |
+| `Reference.symbol` (optional, `.none` when unresolved), `Reference.scope`, `Reference.node`, `Reference.identifier` | `src/semantic/Reference.zig` |
+| `ModuleRecord.ImportEntry{ specifier, node, kind }` | `src/semantic/ModuleRecord.zig` |
+| `Semantic.nodeSpan`, `Semantic.nodeSlice`, `Semantic.getBinding`, `Semantic.resolveBinding` | `src/semantic/Semantic.zig` |
+| `visitFieldAccess` is a `// TODO: record references` stub | `src/semantic/Builder.zig:850` |
 
 ---
 
@@ -366,12 +366,12 @@ therefore invisible today.
   "dead" is worse than a missed one.
 - Test: `var s: Server = ...; s.run();` and a `self.helper()` call.
 
-### 7.3 Alternative: patch ZLint
+### 7.3 Patch the semantic layer directly
 
-`vendor/zlint` is a git submodule. Recording field-access references in
-`Builder.visitFieldAccess` upstream would remove most of 7.1 and 7.2's
-AST walking. Consider a fork branch pinned in `.gitmodules` if the
-resolver grows past a few hundred lines. Evaluate after 7.1 is done.
+`src/semantic/` is our own copy, so recording field-access references in
+`Builder.visitFieldAccess` is a normal commit (list it in
+`src/semantic/UPSTREAM.md`). That would remove most of 7.1 and 7.2's AST
+walking; evaluate once the resolver grows past a few hundred lines.
 
 ---
 

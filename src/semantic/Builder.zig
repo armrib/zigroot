@@ -13,9 +13,6 @@ const SemanticBuilder = @This();
 _gpa: Allocator,
 _arena: ArenaAllocator,
 
-_source_code: ?_source.ArcStr = null,
-_source_path: ?[]const u8 = null,
-
 // states
 _curr_scope_flags: Scope.Flags = .{},
 _curr_symbol_flags: Symbol.Flags = .{},
@@ -70,12 +67,6 @@ pub fn init(gpa: Allocator) SemanticBuilder {
         ._semantic = undefined,
         ._arena = ArenaAllocator.init(gpa),
     };
-}
-
-pub fn withSource(self: *SemanticBuilder, source: *const _source.Source) void {
-    if (self._source_code) |*s| s.deinit();
-    self._source_code = source.contents.clone();
-    self._source_path = source.pathname;
 }
 
 /// Parse and analyze a Zig source file.
@@ -173,7 +164,6 @@ pub fn deinit(self: *SemanticBuilder) void {
     self._symbol_stack.deinit(self._gpa);
     self._node_stack.deinit(self._gpa);
     self._unresolved_references.deinit(self._gpa);
-    if (self._source_code) |*src| src.deinit();
 }
 
 // =========================================================================
@@ -1791,8 +1781,6 @@ fn addAstError(self: *SemanticBuilder, ast: *const Ast, ast_err: Ast.Error) Allo
     }
 
     err.code = "syntax error";
-    if (self._source_code) |src| err.source = src.clone();
-    if (self._source_path) |path| err.source_name = try self._gpa.dupe(u8, path);
 
     try self._errors.append(self._gpa, err);
 }
@@ -1879,7 +1867,7 @@ fn printScopeStack(self: *const SemanticBuilder) void {
 }
 
 const builtins = @import("builtins.zig");
-const Semantic = @import("../Semantic.zig");
+const Semantic = @import("Semantic.zig");
 const Scope = Semantic.Scope;
 const Symbol = Semantic.Symbol;
 const NodeLinks = Semantic.NodeLinks;
@@ -1904,13 +1892,12 @@ const Node = _ast.Node;
 const NodeIndex = _ast.NodeIndex;
 const TokenIndex = _ast.TokenIndex;
 
-const Error = @import("../Error.zig");
-const _source = @import("../source.zig");
-const _span = @import("../span.zig");
+const Error = @import("Error.zig");
+const _span = @import("span.zig");
 const LabeledSpan = _span.LabeledSpan;
 const Span = _span.Span;
 
-const util = @import("util");
+const util = @import("util.zig");
 const IS_DEBUG = util.IS_DEBUG;
 
 const t = std.testing;

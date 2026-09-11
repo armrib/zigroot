@@ -125,7 +125,7 @@ test "Bitflags.format" {
     const some = TestFlags{ .a = true, .c = true };
     const all = TestFlags{ .a = true, .b = true, .c = true, .d = true };
     try expectFmt("0", "{d}", .{empty.repr()});
-    const name = "util.bitflags_test.TestFlags";
+    const name = @typeName(TestFlags);
     try expectFmt(name ++ "()", "{f}", .{empty});
     try expectFmt(name ++ "(a | c)", "{f}", .{some});
     try expectFmt(name ++ "(a | b | c | d)", "{f}", .{all});

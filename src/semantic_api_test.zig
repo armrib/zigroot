@@ -1,12 +1,12 @@
-//! Phase 0: prove ZLint's `Semantic` is reusable as a library, independent
-//! of any dead-code logic of our own. If these break, it means ZLint
-//! changed its public `Semantic` surface in a way `Project` also needs to
-//! account for.
+//! Locks in the parts of `semantic/`'s public surface that `Project` and
+//! the resolvers rely on, independent of any dead-code logic of our own.
+//! The tree under `src/semantic/` is our own (ZLint-derived, see
+//! `src/semantic/UPSTREAM.md`) copy, so if these break, some local edit to
+//! it changed an API the project layer also depends on.
 
 const std = @import("std");
 const t = std.testing;
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 
 fn build(src: [:0]const u8) !Semantic {
     var builder = Semantic.Builder.init(t.allocator);

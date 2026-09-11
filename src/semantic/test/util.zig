@@ -1,51 +1,25 @@
+//! Test helpers for the semantic tree's own regression tests. Trimmed from
+//! ZLint's `src/Semantic/test/util.zig` (see `../UPSTREAM.md`): the
+//! graphical error reporter and `Source` wrapper are gone, diagnostics are
+//! printed plainly.
 const std = @import("std");
 
-const _source = @import("../../source.zig");
-const Semantic = @import("../../Semantic.zig");
-const report = @import("../../reporter.zig");
-
-const printer = @import("../../root.zig").printer;
+const Semantic = @import("../Semantic.zig");
 
 const t = std.testing;
 const print = std.debug.print;
-
-var buf: [1024]u8 = undefined;
 
 /// Build a Semantic from source, returning the raw Result so tests can
 /// inspect errors. Unlike `build`, this does not fail on analysis errors —
 /// callers are expected to assert on `result.hasErrors()` themselves.
 pub fn buildWithErrors(src: [:0]const u8) !Semantic.Builder.Result {
     var builder = Semantic.Builder.init(t.allocator);
-    errdefer builder.deinit();
-    var source = try _source.Source.fromString(
-        t.allocator,
-        try t.allocator.dupeZ(u8, src),
-        try t.allocator.dupe(u8, "test.zig"),
-    );
-    defer source.deinit();
-    builder.withSource(&source);
-    const result = try builder.build(src);
-    builder.deinit();
-    return result;
+    defer builder.deinit();
+    return try builder.build(src);
 }
 
 pub fn build(src: [:0]const u8) !Semantic {
-    const w = std.fs.File.stderr().writer(&buf);
-    var stderr = w.interface;
-    var r = try report.Reporter.graphical(
-        &stderr,
-        t.allocator,
-        report.formatter.Graphical.Theme.unicodeNoColor(),
-    );
-    defer r.deinit();
     var builder = Semantic.Builder.init(t.allocator);
-    var source = try _source.Source.fromString(
-        t.allocator,
-        try t.allocator.dupeZ(u8, src),
-        try t.allocator.dupe(u8, "test.zig"),
-    );
-    defer source.deinit();
-    builder.withSource(&source);
     defer builder.deinit();
 
     var result = builder.build(src) catch |e| {
@@ -54,31 +28,18 @@ pub fn build(src: [:0]const u8) !Semantic {
     };
     errdefer result.value.deinit();
     if (result.hasErrors()) {
+        defer result.deinitErrors();
         print("Analysis failed.\n", .{});
-        r.reportErrors(result.errors.toManaged(t.allocator)) catch @panic("OOM");
+        for (result.errors.items) |err| {
+            print("  {s}: {s}\n", .{ err.severity.asSlice(), err.message });
+            for (err.labels.items) |label| {
+                print("    at bytes {d}..{d}\n", .{ label.span.start, label.span.end });
+            }
+        }
         print("\nSource:\n\n{s}\n\n", .{src});
         return error.AnalysisFailed;
     }
 
+    result.deinitErrors();
     return result.value;
-}
-
-pub fn debugSemantic(semantic: *const Semantic) !void {
-    var p = printer.Printer.init(t.allocator, std.io.getStdErr().writer());
-    defer p.deinit();
-    var sp = printer.SemanticPrinter.new(&p, semantic);
-
-    print("Symbol table:\n\n", .{});
-    try sp.printSymbolTable();
-
-    print("\n\nUnresolved references:\n\n", .{});
-    try sp.printUnresolvedReferences();
-
-    print("\n\nScopes:\n\n", .{});
-    try sp.printScopeTree();
-    print("\n\n", .{});
-
-    print("\n\nModules:\n\n", .{});
-    try sp.printModuleRecord();
-    print("\n\n", .{});
 }

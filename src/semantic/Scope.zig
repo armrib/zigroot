@@ -190,7 +190,7 @@ const ScopeParentIterator = struct {
 };
 
 const std = @import("std");
-const util = @import("util");
+const util = @import("util.zig");
 const _ast = @import("ast.zig");
 
 const Allocator = std.mem.Allocator;

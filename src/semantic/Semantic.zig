@@ -142,22 +142,22 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Span = @import("span.zig").Span;
 const assert = std.debug.assert;
 
-const _ast = @import("Semantic/ast.zig");
-const _tokenizer = @import("Semantic/tokenizer.zig");
+const _ast = @import("ast.zig");
+const _tokenizer = @import("tokenizer.zig");
 const TokenIndex = _ast.TokenIndex;
 
 // re-exports
-const util = @import("util");
+const util = @import("util.zig");
 const zig = std.zig;
 pub const Ast = zig.Ast;
-pub const Builder = @import("Semantic/Builder.zig");
+pub const Builder = @import("Builder.zig");
 pub const CommentList = _tokenizer.CommentList;
-pub const ModuleRecord = @import("Semantic/ModuleRecord.zig");
-pub const NodeLinks = @import("Semantic/NodeLinks.zig");
-pub const Parse = @import("Semantic/Parse.zig");
-pub const Reference = @import("Semantic/Reference.zig");
-pub const Scope = @import("Semantic/Scope.zig");
-pub const Symbol = @import("Semantic/Symbol.zig");
+pub const ModuleRecord = @import("ModuleRecord.zig");
+pub const NodeLinks = @import("NodeLinks.zig");
+pub const Parse = @import("Parse.zig");
+pub const Reference = @import("Reference.zig");
+pub const Scope = @import("Scope.zig");
+pub const Symbol = @import("Symbol.zig");
 pub const Token = _tokenizer.Token;
 pub const TokenList = _tokenizer.TokenList;
 
@@ -166,25 +166,14 @@ test {
 }
 
 test Semantic {
-    const Source = @import("source.zig").Source;
     const source_text = "pub fn add(a: u32, b: u32) u32 { return a + b; }";
     const allocator = std.testing.allocator;
-
-    // use Source.init to read from a file. the fromString API is clunky but
-    // only used for testing.
-    var src = try Source.fromString(
-        allocator,
-        try allocator.dupeZ(u8, source_text),
-        try allocator.dupe(u8, "test.zig"),
-    );
-    defer src.deinit();
 
     // parse the source and analyze it. spits out a result with the final Semantic
     // plus any Errors (diagnostics) that were encountered.
     var builder = Semantic.Builder.init(allocator);
     defer builder.deinit();
-    builder.withSource(&src);
-    var result = try builder.build(src.text());
+    var result = try builder.build(source_text);
 
     // use .deinit() to free everything. if you plan on taking ownership of the Semantic,
     // you want .deinitErrors()

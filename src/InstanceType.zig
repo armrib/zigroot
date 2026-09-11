@@ -86,8 +86,7 @@
 //! the target file's exports — can finish the lookup.
 
 const std = @import("std");
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 const Ast = Semantic.Ast;
 const FieldChain = @import("FieldChain.zig");
 const OwnerMap = @import("OwnerMap.zig");

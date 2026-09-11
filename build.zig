@@ -4,18 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zlint_dep = b.dependency("zlint", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const zlint_mod = zlint_dep.module("zlint");
-
     const zigroot_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    zigroot_mod.addImport("zlint", zlint_mod);
 
     const exe = b.addExecutable(.{
         .name = "zigroot",
@@ -26,7 +19,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("zigroot", zigroot_mod);
-    exe.root_module.addImport("zlint", zlint_mod);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

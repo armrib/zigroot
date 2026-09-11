@@ -347,7 +347,7 @@ pub const ReferenceIterator = struct {
 };
 
 const std = @import("std");
-const util = @import("util");
+const util = @import("util.zig");
 const ast = @import("ast.zig");
 
 const Allocator = std.mem.Allocator;

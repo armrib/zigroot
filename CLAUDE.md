@@ -24,15 +24,18 @@ tickets sitting in the directory, and don't just mark them done in place.
 ## Commands
 
 ```sh
-zig build --fetch   # first time only, fetches ZLint via the package manager
 zig build test      # run the whole test suite
 zig build            # build zig-out/bin/zigroot
 zig build run         # build+run against this repo's own build.zig
 ```
 
-Requires Zig 0.15.x — ZLint is pinned to a pre-0.16 commit (see
-`build.zig.zon`) because its `main` branch moved to 0.16's `Io`-threaded
-filesystem API. Re-evaluate that pin before adding new ZLint-derived code.
+Requires Zig 0.15.x. There are no package dependencies: the per-file
+semantic layer is a modified copy of ZLint's, vendored under
+`src/semantic/` (MIT; provenance and the list of local modifications live
+in `src/semantic/UPSTREAM.md` — update that list whenever a file in that
+directory is edited). ZLint's `main` branch moved to Zig 0.16's
+`Io`-threaded filesystem API after the copied commit, so pulling newer
+upstream changes into `src/semantic/` means porting them.
 
 There's no dedicated single-test filter wired up in `build.zig`; run the
 full `zig build test` (it's fast — the corpus is this repo's own small
@@ -45,9 +48,8 @@ itself:
 ```sh
 zig-out/bin/zigroot
 ```
-Or `cd` into the ZLint dependency's checkout (under `zig-cache`/the global
-package cache) for a bigger real-world corpus, since it has its own
-`build.zig`.
+Or `cd` into a checkout of ZLint (`git clone https://github.com/DonIsaac/zlint`)
+for a bigger real-world corpus, since it has its own `build.zig`.
 
 Exits non-zero if any orphan files or dead declarations are found.
 

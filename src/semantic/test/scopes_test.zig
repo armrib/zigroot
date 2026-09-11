@@ -1,8 +1,8 @@
 const std = @import("std");
-const Semantic = @import("../../Semantic.zig");
+const Semantic = @import("../Semantic.zig");
 
 const t = std.testing;
-const build = @import("./util.zig").build;
+const build = @import("util.zig").build;
 
 const Scope = Semantic.Scope;
 
