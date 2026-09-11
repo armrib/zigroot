@@ -322,6 +322,59 @@ test "loadBuildGraph follows a split-out helper file's b.path() calls relative t
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
 
+test "loadBuildGraph resolves a module forwarded through an Options-struct field into a helper's wire() call (issue 39)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\const helper = @import("helper.zig");
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    const dep_mod = b.createModule(.{ .root_source_file = b.path("src/dep.zig") });
+        \\    helper.wire(b, .{ .dep = dep_mod });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "helper.zig",
+        \\const std = @import("std");
+        \\
+        \\pub const Options = struct { dep: *std.Build.Module };
+        \\
+        \\pub fn wire(b: *std.Build, opts: Options) void {
+        \\    const exe_mod = b.createModule(.{ .root_source_file = b.path("src/main.zig") });
+        \\    exe_mod.addImport("dep", opts.dep);
+        \\    _ = b.addExecutable(.{ .name = "app", .root_module = exe_mod });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const dep = @import("dep");
+        \\pub fn main() void {
+        \\    dep.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/dep.zig",
+        \\pub fn run() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
+}
+
 test "a .zig-suffixed named-module import consults build_graph instead of only guessing a sibling path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

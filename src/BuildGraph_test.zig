@@ -338,9 +338,21 @@ test "parseInto resolves a call to a cross-file-import-aliased helper via the gi
             try t.expectEqualStrings("yamlModule", fn_name);
             return try gpa.dupe(u8, "libs/yaml/yaml.zig");
         }
+
+        fn paramRequirements(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]BuildGraph.ParamRequirement {
+            _ = context;
+            _ = gpa;
+            _ = rel_import_path;
+            _ = fn_name;
+            return null;
+        }
     };
     var dummy_ctx: u8 = 0;
-    const resolver: BuildGraph.HelperResolver = .{ .context = &dummy_ctx, .resolveFn = StubResolver.resolve };
+    const resolver: BuildGraph.HelperResolver = .{
+        .context = &dummy_ctx,
+        .resolveFn = StubResolver.resolve,
+        .paramRequirementsFn = StubResolver.paramRequirements,
+    };
 
     var graph: BuildGraph = .empty;
     defer graph.deinit(t.allocator);
@@ -471,4 +483,99 @@ test "resolves an addImport value that's a field access into a helper's returned
     const paths = graph.resolve("foo").?;
     try t.expectEqual(@as(usize, 1), paths.len);
     try t.expectEqualStrings("src/foo.zig", paths[0]);
+}
+
+test "paramFieldRequirements finds an addImport fed directly by an Options-struct field" {
+    const source: [:0]const u8 =
+        \\const std = @import("std");
+        \\pub const Options = struct { yaml_mod: *std.Build.Module };
+        \\pub fn wire(b: *std.Build, opts: Options) void {
+        \\    const main = b.createModule(.{ .root_source_file = b.path("src/main.zig") });
+        \\    main.addImport("yaml", opts.yaml_mod);
+        \\}
+        \\
+    ;
+    var tree = try std.zig.Ast.parse(t.allocator, source, .zig);
+    defer tree.deinit(t.allocator);
+
+    var out: std.ArrayListUnmanaged(BuildGraph.ParamRequirement) = .empty;
+    defer BuildGraph.freeParamRequirements(t.allocator, out.toOwnedSlice(t.allocator) catch unreachable);
+    try BuildGraph.paramFieldRequirements(t.allocator, &tree, "wire", &out);
+
+    try t.expectEqual(@as(usize, 1), out.items.len);
+    try t.expectEqualStrings("yaml", out.items[0].import_name);
+    try t.expectEqualStrings("yaml_mod", out.items[0].param_field);
+}
+
+test "paramFieldRequirements finds an addImport fed by createModule(b.path(opts.field))" {
+    const source: [:0]const u8 =
+        \\const std = @import("std");
+        \\pub const CodegenOptions = struct { routes_src: []const u8 };
+        \\pub fn addCodegen(b: *std.Build, opts: CodegenOptions) void {
+        \\    const routes_mod = b.createModule(.{ .root_source_file = b.path(opts.routes_src) });
+        \\    const mod = b.createModule(.{ .root_source_file = b.path("src/codegen.zig") });
+        \\    mod.addImport("routes", routes_mod);
+        \\}
+        \\
+    ;
+    var tree = try std.zig.Ast.parse(t.allocator, source, .zig);
+    defer tree.deinit(t.allocator);
+
+    var out: std.ArrayListUnmanaged(BuildGraph.ParamRequirement) = .empty;
+    defer BuildGraph.freeParamRequirements(t.allocator, out.toOwnedSlice(t.allocator) catch unreachable);
+    try BuildGraph.paramFieldRequirements(t.allocator, &tree, "addCodegen", &out);
+
+    try t.expectEqual(@as(usize, 1), out.items.len);
+    try t.expectEqualStrings("routes", out.items[0].import_name);
+    try t.expectEqualStrings("routes_src", out.items[0].param_field);
+}
+
+test "parseInto resolves a module/path forwarded through an Options struct into a cross-file wire() call" {
+    const StubResolver = struct {
+        fn resolve(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
+            _ = context;
+            _ = gpa;
+            _ = rel_import_path;
+            _ = fn_name;
+            return null;
+        }
+
+        fn paramRequirements(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]BuildGraph.ParamRequirement {
+            _ = context;
+            try t.expectEqualStrings("helper.zig", rel_import_path);
+            try t.expectEqualStrings("wire", fn_name);
+            const out = try gpa.alloc(BuildGraph.ParamRequirement, 1);
+            out[0] = .{ .import_name = try gpa.dupe(u8, "dep"), .param_field = try gpa.dupe(u8, "dep") };
+            return out;
+        }
+    };
+    var dummy_ctx: u8 = 0;
+    const resolver: BuildGraph.HelperResolver = .{
+        .context = &dummy_ctx,
+        .resolveFn = StubResolver.resolve,
+        .paramRequirementsFn = StubResolver.paramRequirements,
+    };
+
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| t.allocator.free(p);
+        file_imports.deinit(t.allocator);
+    }
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\const helper = @import("helper.zig");
+        \\pub fn build(b: *std.Build) void {
+        \\    const dep_mod = b.createModule(.{ .root_source_file = b.path("src/dep.zig") });
+        \\    helper.wire(b, .{ .dep = dep_mod });
+        \\}
+        \\
+    , &file_imports, resolver);
+
+    const paths = graph.resolve("dep").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("src/dep.zig", paths[0]);
 }

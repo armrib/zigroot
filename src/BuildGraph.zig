@@ -58,11 +58,37 @@ pub const empty: BuildGraph = .{};
 pub const HelperResolver = struct {
     context: *anyopaque,
     resolveFn: *const fn (context: *anyopaque, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) anyerror!?[]u8,
+    /// Resolves an `Options`-struct-forwarding call site — see
+    /// `ParamRequirement` and `paramFieldRequirements`.
+    paramRequirementsFn: *const fn (context: *anyopaque, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) anyerror!?[]ParamRequirement,
 
     fn resolve(self: HelperResolver, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
         return self.resolveFn(self.context, gpa, rel_import_path, fn_name);
     }
+
+    fn paramRequirements(self: HelperResolver, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]ParamRequirement {
+        return self.paramRequirementsFn(self.context, gpa, rel_import_path, fn_name);
+    }
 };
+
+/// One `addImport("<import_name>", opts.<param_field>)` (or an `addImport`
+/// fed by a `b.createModule(.{ .root_source_file = b.path(opts.<param_field>)
+/// })` bound to a local var) found inside a `wire`-shaped function's body —
+/// see `paramFieldRequirements`. Both fields are owned, caller-freed copies.
+pub const ParamRequirement = struct {
+    import_name: []const u8,
+    param_field: []const u8,
+
+    fn deinit(self: ParamRequirement, gpa: Allocator) void {
+        gpa.free(self.import_name);
+        gpa.free(self.param_field);
+    }
+};
+
+pub fn freeParamRequirements(gpa: Allocator, requirements: []ParamRequirement) void {
+    for (requirements) |req| req.deinit(gpa);
+    gpa.free(requirements);
+}
 
 pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     var it = self.modules.iterator();
@@ -250,6 +276,14 @@ pub fn parseInto(
                 }
             }
             continue;
+        }
+
+        if (resolver) |r| {
+            if (crossFileHelperCall(&tree, call)) |helper_call| {
+                if (import_aliases.get(helper_call.alias)) |alias_tok| {
+                    try resolveParamForwardingCall(gpa, &tree, r, alias_tok, helper_call.fn_name, &bindings, &field_bindings, call, result, &struct_buf);
+                }
+            }
         }
 
         if (!std.mem.eql(u8, field, "addImport")) continue;
@@ -519,6 +553,205 @@ fn resolveCrossFileHelper(
     const rel_path = parseStringLiteral(gpa, tree, alias_tok) catch return null;
     defer gpa.free(rel_path);
     return r.resolve(gpa, rel_path, helper_call.fn_name) catch null;
+}
+
+/// If `call` is `<alias>.<fn>(..., .{ .field = value, ... })` where `alias`
+/// is a known local-file `@import` alias (recorded in `import_aliases`) and
+/// `resolver` is given, asks `resolver` for `fn`'s `ParamRequirement`s (as
+/// defined in whichever file `alias`'s import specifier points to) and, for
+/// every requirement whose `param_field` matches a field in this call's
+/// struct-literal argument, resolves that field's value to a path (via
+/// `pathForBinding`, against bindings already accumulated by this scan) and
+/// records it directly in `result` under the requirement's `import_name` —
+/// closing the loop `apps/<name>/build.zig: pub fn wire(b, opts: Options)`
+/// leaves open (see issues/39): `opts.<field>` isn't a traceable local
+/// variable inside `wire`'s own file, but the value it stands for is right
+/// here at the call site. Best-effort: does nothing if the resolver can't
+/// find a matching `wire`-shaped function or a requirement's field isn't
+/// supplied at this call site.
+fn resolveParamForwardingCall(
+    gpa: Allocator,
+    tree: *const Ast,
+    resolver: HelperResolver,
+    alias_tok: Ast.TokenIndex,
+    fn_name: []const u8,
+    bindings: *const std.StringHashMapUnmanaged([]const u8),
+    field_bindings: *const std.StringHashMapUnmanaged([]const u8),
+    call: Ast.full.Call,
+    result: *BuildGraph,
+    struct_buf: *[2]Ast.Node.Index,
+) !void {
+    var options_node: ?Ast.Node.Index = null;
+    for (call.ast.params) |param| {
+        if (tree.fullStructInit(struct_buf, param) != null) {
+            options_node = param;
+            break;
+        }
+    }
+    const options = options_node orelse return;
+    const struct_init = tree.fullStructInit(struct_buf, options) orelse return;
+
+    const rel_path = parseStringLiteral(gpa, tree, alias_tok) catch return;
+    defer gpa.free(rel_path);
+
+    const requirements = (resolver.paramRequirements(gpa, rel_path, fn_name) catch return) orelse return;
+    defer freeParamRequirements(gpa, requirements);
+
+    for (requirements) |req| {
+        for (struct_init.ast.fields) |field_value| {
+            const name_tok = tree.firstToken(field_value) - 2;
+            if (!std.mem.eql(u8, tree.tokenSlice(name_tok), req.param_field)) continue;
+            const path = pathForBinding(tree, bindings, field_bindings, field_value) orelse continue;
+            const import_name = try gpa.dupe(u8, req.import_name);
+            errdefer gpa.free(import_name);
+            try addModulePath(gpa, result, import_name, path);
+        }
+    }
+}
+
+/// Scans `fn_name`'s body in `tree` for `addImport("<name>", opts.<field>)`
+/// calls (or an `addImport` fed by a local var bound to `b.createModule(.{
+/// .root_source_file = b.path(opts.<field>) })`) where `opts` is one of
+/// `fn_name`'s own parameters — the "forwards a caller-supplied module/path
+/// through an `Options` struct field" shape (see issues/39) — and appends a
+/// `ParamRequirement` for each to `out`. Scoped to the function's body by
+/// token position (like the rest of this file, a flat/best-effort scan
+/// rather than a real scope-aware walk); `fn_name` not found, or found with
+/// no matching parameter, yields no requirements.
+pub fn paramFieldRequirements(
+    gpa: Allocator,
+    tree: *const Ast,
+    fn_name: []const u8,
+    out: *std.ArrayListUnmanaged(ParamRequirement),
+) !void {
+    const fn_decl = findFnDecl(tree, fn_name) orelse return;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = tree.fullFnProto(&proto_buf, fn_decl) orelse return;
+
+    var param_names_buf: [8][]const u8 = undefined;
+    var param_count: usize = 0;
+    var pit = proto.iterate(tree);
+    while (pit.next()) |param| {
+        const name_tok = param.name_token orelse continue;
+        if (param_count >= param_names_buf.len) break;
+        param_names_buf[param_count] = tree.tokenSlice(name_tok);
+        param_count += 1;
+    }
+    const param_names = param_names_buf[0..param_count];
+    if (param_names.len == 0) return;
+
+    const body = tree.nodeData(fn_decl).node_and_node[1];
+    const body_start = tree.firstToken(body);
+    const body_end = tree.lastToken(body);
+
+    // local var (inside fn_name's body) -> param field name, for a
+    // `b.createModule(.{ .root_source_file = b.path(opts.<field>) })` bound
+    // to a var later passed to `addImport`.
+    var param_bindings: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer param_bindings.deinit(gpa);
+
+    var call_buf: [1]Ast.Node.Index = undefined;
+    var struct_buf: [2]Ast.Node.Index = undefined;
+
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        const node: Ast.Node.Index = @enumFromInt(i);
+        const start_tok = tree.firstToken(node);
+        if (start_tok < body_start or start_tok > body_end) continue;
+
+        if (tree.fullVarDecl(node)) |var_decl| {
+            const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+            const var_name_tok = var_decl.ast.mut_token + 1;
+            const var_name = tree.tokenSlice(var_name_tok);
+
+            if (paramFieldOfCreateModule(tree, init_node, param_names, &call_buf, &struct_buf)) |pfield| {
+                try param_bindings.put(gpa, var_name, pfield);
+            }
+            continue;
+        }
+
+        const call = tree.fullCall(&call_buf, node) orelse continue;
+        const field = fieldAccessName(tree, call.ast.fn_expr) orelse continue;
+        if (!std.mem.eql(u8, field, "addImport")) continue;
+        if (call.ast.params.len < 2) continue;
+
+        const name_node = call.ast.params[0];
+        if (tree.nodeTag(name_node) != .string_literal) continue;
+
+        const value_node = call.ast.params[1];
+        const param_field = paramFieldOfValue(tree, value_node, param_names, &param_bindings) orelse continue;
+
+        const import_name = parseStringLiteral(gpa, tree, tree.nodeMainToken(name_node)) catch continue;
+        errdefer gpa.free(import_name);
+        const field_dup = try gpa.dupe(u8, param_field);
+        errdefer gpa.free(field_dup);
+        try out.append(gpa, .{ .import_name = import_name, .param_field = field_dup });
+    }
+}
+
+/// If `node` is `<recv>.createModule(.{ ..., .root_source_file =
+/// b.path(<ident>.<field>) , ... })` where `<ident>` names one of
+/// `param_names`, returns `<field>` — the parameterized-path counterpart of
+/// `rootSourceFileOfCreateModule`, which only handles a literal path.
+fn paramFieldOfCreateModule(
+    tree: *const Ast,
+    node: Ast.Node.Index,
+    param_names: []const []const u8,
+    call_buf: *[1]Ast.Node.Index,
+    struct_buf: *[2]Ast.Node.Index,
+) ?[]const u8 {
+    const call = tree.fullCall(call_buf, node) orelse return null;
+    const field = fieldAccessName(tree, call.ast.fn_expr) orelse return null;
+    if (!std.mem.eql(u8, field, "createModule")) return null;
+    if (call.ast.params.len < 1) return null;
+
+    const struct_init = tree.fullStructInit(struct_buf, call.ast.params[0]) orelse return null;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_source_file")) continue;
+
+        var inner_buf: [1]Ast.Node.Index = undefined;
+        const path_call = tree.fullCall(&inner_buf, field_value) orelse return null;
+        const path_field = fieldAccessName(tree, path_call.ast.fn_expr) orelse return null;
+        if (!std.mem.eql(u8, path_field, "path")) return null;
+        if (path_call.ast.params.len < 1) return null;
+
+        return paramFieldOfArg(tree, path_call.ast.params[0], param_names);
+    }
+    return null;
+}
+
+/// If `arg` is `<ident>.<field>` where `<ident>` names one of `param_names`,
+/// returns `<field>`.
+fn paramFieldOfArg(tree: *const Ast, arg: Ast.Node.Index, param_names: []const []const u8) ?[]const u8 {
+    if (tree.nodeTag(arg) != .field_access) return null;
+    const base_node = tree.nodeData(arg).node_and_token[0];
+    if (tree.nodeTag(base_node) != .identifier) return null;
+    const base = tree.tokenSlice(tree.nodeMainToken(base_node));
+
+    for (param_names) |p| {
+        if (std.mem.eql(u8, base, p)) return fieldAccessName(tree, arg);
+    }
+    return null;
+}
+
+/// Resolves an `addImport` second argument to a parameter field name: either
+/// directly `opts.<field>`, or an identifier already bound in
+/// `param_bindings` by `paramFieldOfCreateModule`.
+fn paramFieldOfValue(
+    tree: *const Ast,
+    value_node: Ast.Node.Index,
+    param_names: []const []const u8,
+    param_bindings: *const std.StringHashMapUnmanaged([]const u8),
+) ?[]const u8 {
+    switch (tree.nodeTag(value_node)) {
+        .identifier => {
+            const name = tree.tokenSlice(tree.nodeMainToken(value_node));
+            return param_bindings.get(name);
+        },
+        .field_access => return paramFieldOfArg(tree, value_node, param_names),
+        else => return null,
+    }
 }
 
 /// If `tree` contains a `fn <fn_name>(...) ... { ... }` declaration whose

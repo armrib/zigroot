@@ -136,7 +136,11 @@ fn scanBuildFile(
 
     const dir = std.fs.path.dirname(canonical) orelse ".";
     var resolve_ctx: HelperResolveCtx = .{ .project = self, .cache = helper_cache, .dir = dir };
-    const resolver: BuildGraph.HelperResolver = .{ .context = &resolve_ctx, .resolveFn = HelperResolveCtx.resolve };
+    const resolver: BuildGraph.HelperResolver = .{
+        .context = &resolve_ctx,
+        .resolveFn = HelperResolveCtx.resolve,
+        .paramRequirementsFn = HelperResolveCtx.paramRequirements,
+    };
 
     try BuildGraph.parseInto(self.gpa, graph, source, &file_imports, resolver);
 
@@ -217,6 +221,28 @@ const HelperResolveCtx = struct {
         var struct_buf: [2]std.zig.Ast.Node.Index = undefined;
         const tok = BuildGraph.rootSourceFileOfHelperFn(tree, fn_name, &call_buf, &struct_buf) orelse return null;
         return BuildGraph.parseStringLiteral(gpa, tree, tok) catch null;
+    }
+
+    fn paramRequirements(context: *anyopaque, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]BuildGraph.ParamRequirement {
+        const self: *HelperResolveCtx = @ptrCast(@alignCast(context));
+
+        const target_path = std.fs.path.resolve(gpa, &.{ self.dir, rel_import_path }) catch return null;
+        defer gpa.free(target_path);
+        const target_canonical = self.project.canonicalize(target_path) catch return null;
+        defer gpa.free(target_canonical);
+
+        const tree = (try self.cache.getOrLoad(gpa, target_canonical)) orelse return null;
+
+        var out: std.ArrayListUnmanaged(BuildGraph.ParamRequirement) = .empty;
+        errdefer {
+            for (out.items) |req| {
+                gpa.free(req.import_name);
+                gpa.free(req.param_field);
+            }
+            out.deinit(gpa);
+        }
+        try BuildGraph.paramFieldRequirements(gpa, tree, fn_name, &out);
+        return try out.toOwnedSlice(gpa);
     }
 };
 
