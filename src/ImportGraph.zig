@@ -49,8 +49,6 @@ pub const UnresolvedImport = struct {
 
 edges: std.ArrayListUnmanaged(Edge) = .empty,
 unresolved: std.ArrayListUnmanaged(UnresolvedImport) = .empty,
-/// from -> [to, to, ...]
-adjacency: std.AutoHashMapUnmanaged(FileId, std.ArrayListUnmanaged(FileId)) = .empty,
 /// from -> [edge, edge, ...], the same edges as `edges` grouped by source
 /// file so a lookup for one file's imports doesn't scan the whole project.
 edges_by_from: std.AutoHashMapUnmanaged(FileId, std.ArrayListUnmanaged(Edge)) = .empty,
@@ -61,9 +59,6 @@ pub fn deinit(self: *ImportGraph, gpa: Allocator) void {
     self.edges.deinit(gpa);
     for (self.unresolved.items) |u| gpa.free(u.specifier);
     self.unresolved.deinit(gpa);
-    var it = self.adjacency.valueIterator();
-    while (it.next()) |list| list.deinit(gpa);
-    self.adjacency.deinit(gpa);
     var by_from_it = self.edges_by_from.valueIterator();
     while (by_from_it.next()) |list| list.deinit(gpa);
     self.edges_by_from.deinit(gpa);
@@ -73,9 +68,6 @@ pub fn deinit(self: *ImportGraph, gpa: Allocator) void {
 pub fn addEdge(self: *ImportGraph, gpa: Allocator, from: FileId, to: FileId, node: Semantic.Ast.Node.Index) !void {
     const edge: Edge = .{ .from = from, .to = to, .node = node };
     try self.edges.append(gpa, edge);
-    const gop = try self.adjacency.getOrPut(gpa, from);
-    if (!gop.found_existing) gop.value_ptr.* = .empty;
-    try gop.value_ptr.append(gpa, to);
     const by_from_gop = try self.edges_by_from.getOrPut(gpa, from);
     if (!by_from_gop.found_existing) by_from_gop.value_ptr.* = .empty;
     try by_from_gop.value_ptr.append(gpa, edge);
@@ -104,11 +96,4 @@ pub fn addUnresolved(
         .node = node,
         .reason = reason,
     });
-}
-
-/// Files directly imported by `file`. Empty slice if `file` imports nothing
-/// resolvable.
-pub fn outgoing(self: *const ImportGraph, file: FileId) []const FileId {
-    if (self.adjacency.get(file)) |list| return list.items;
-    return &.{};
 }

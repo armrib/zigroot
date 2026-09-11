@@ -207,3 +207,50 @@ test "only a top-level main is the entry point, not an earlier parameter or loca
     try t.expect(root_sym.flags.s_fn);
     try t.expectEqual(Roots.RootKind.executable_entry, roots.roots.items[0].kind);
 }
+
+test "a symbol referenced from a container-level comptime block is a comptime_block root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Registry = struct {
+        \\    pub fn register() void {}
+        \\};
+        \\fn forced() void {}
+        \\comptime {
+        \\    _ = forced;
+        \\    _ = Registry.register;
+        \\}
+        \\pub fn main() void {}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const forced = semantic.symbols.getSymbolNamed("forced").?;
+    const register = semantic.symbols.getSymbolNamed("register").?;
+
+    var found_forced = false;
+    var found_register = false;
+    for (roots.roots.items) |root| {
+        if (root.symbol.eql(.{ .file = file_id, .local = forced })) {
+            try t.expectEqual(Roots.RootKind.comptime_block, root.kind);
+            found_forced = true;
+        }
+        if (root.symbol.eql(.{ .file = file_id, .local = register })) {
+            try t.expectEqual(Roots.RootKind.comptime_block, root.kind);
+            found_register = true;
+        }
+    }
+    try t.expect(found_forced);
+    try t.expect(found_register);
+}

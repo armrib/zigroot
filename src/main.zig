@@ -21,6 +21,7 @@ const std = @import("std");
 const zigroot = @import("zigroot");
 const Project = zigroot.Project;
 const Semantic = zigroot.Semantic;
+const Report = zigroot.Report;
 
 pub fn main() !u8 {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -52,11 +53,12 @@ pub fn main() !u8 {
         std.debug.print("{d} parse error(s); findings below may be incomplete:\n", .{error_count});
         for (project.files.items) |f| {
             for (f.errors.items) |err| {
+                const rel = relativePath(project.build_graph_dir, f.path);
                 if (err.labels.items.len > 0) {
                     const loc = Semantic.Location.fromSpan(f.source, err.labels.items[0].span);
-                    std.debug.print("  {s}:{d}:{d}: {s}\n", .{ f.path, loc.line, loc.column, err.message });
+                    std.debug.print("  {s}:{d}:{d}: {s}\n", .{ rel, loc.line, loc.column, err.message });
                 } else {
-                    std.debug.print("  {s}: {s}\n", .{ f.path, err.message });
+                    std.debug.print("  {s}: {s}\n", .{ rel, err.message });
                 }
             }
         }
@@ -97,7 +99,7 @@ pub fn main() !u8 {
                 .external, .not_a_zig_file => continue,
                 .unknown_module, .load_failed => {},
             }
-            const from_path = project.file(u.from).path;
+            const from_path = relativePath(project.build_graph_dir, project.file(u.from).path);
             std.debug.print("  {s}: @import(\"{s}\") [{s}]\n", .{ from_path, u.specifier, @tagName(u.reason) });
         }
     }
@@ -127,14 +129,14 @@ pub fn main() !u8 {
     if (test_only.items.len > 0) {
         std.debug.print("\n{d} test-only file(s) (not analyzed; test code doesn't count as use):\n", .{test_only.items.len});
         for (test_only.items) |path| {
-            std.debug.print("  {s}\n", .{path});
+            std.debug.print("  {s}\n", .{relativePath(project.build_graph_dir, path)});
         }
     }
 
     if (orphans.items.len > 0) {
         std.debug.print("\n{d} orphan file(s) (unreachable from any root):\n", .{orphans.items.len});
         for (orphans.items) |path| {
-            std.debug.print("  {s}\n", .{path});
+            std.debug.print("  {s}\n", .{relativePath(project.build_graph_dir, path)});
         }
         had_findings = true;
     } else {
@@ -156,65 +158,42 @@ pub fn main() !u8 {
     var scc = try zigroot.Scc.build(gpa, &project, &cross_file);
     defer scc.deinit(gpa);
 
-    var reported_cycles: std.AutoHashMapUnmanaged(zigroot.Scc.ComponentId, void) = .empty;
-    defer reported_cycles.deinit(gpa);
+    var findings = try Report.collect(gpa, &project, dead.items, &scc, project.build_graph_dir);
+    defer Report.deinit(&findings, gpa);
 
     var dead_count: usize = 0;
-    for (dead.items) |d| {
-        if (d.possible) continue;
-        const name = project.symbol(d.id).name;
-        if (name.len == 0) continue;
-
-        if (scc.componentOf(d.id)) |component| {
-            if (scc.isCyclic(component)) {
-                if (reported_cycles.contains(component)) continue;
-                try reported_cycles.put(gpa, component, {});
-                dead_count += 1;
-                continue;
-            }
-        }
-
-        dead_count += 1;
+    var possible_count: usize = 0;
+    for (findings.items) |f| {
+        if (f.possible) possible_count += 1 else dead_count += 1;
     }
-    reported_cycles.clearRetainingCapacity();
 
     if (dead_count > 0) {
         std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead_count});
-    }
-
-    var reported: usize = 0;
-    for (dead.items) |d| {
-        if (d.possible) continue;
-        const name = project.symbol(d.id).name;
-        if (name.len == 0) continue;
-
-        if (scc.componentOf(d.id)) |component| {
-            if (scc.isCyclic(component)) {
-                if (reported_cycles.contains(component)) continue;
-                try reported_cycles.put(gpa, component, {});
-                reported += 1;
-                std.debug.print("  cycle of {d} declaration(s), unreachable from any root:\n", .{scc.members(component).len});
-                for (scc.members(component)) |member| {
-                    const member_name = project.symbol(member).name;
-                    if (member_name.len == 0) continue;
-                    std.debug.print("    {s}: {s}\n", .{ project.file(member.file).path, member_name });
-                }
-                continue;
-            }
+        for (findings.items) |f| {
+            if (!f.possible) Report.print(&project, f);
         }
-
-        reported += 1;
-        std.debug.print("  {s}: {s}", .{ project.file(d.id.file).path, name });
-        if (d.nested > 0) std.debug.print(" (+{d} nested)", .{d.nested});
-        std.debug.print("\n", .{});
-    }
-
-    if (reported > 0) {
         had_findings = true;
     } else {
         std.debug.print("\nno dead declarations found\n", .{});
     }
 
+    if (possible_count > 0) {
+        std.debug.print("\n{d} possibly dead declaration(s) (only reached through a runtime-named @field(...)):\n", .{possible_count});
+        for (findings.items) |f| {
+            if (f.possible) Report.print(&project, f);
+        }
+    }
+
     if (error_count > 0) return 2;
     return if (had_findings) 1 else 0;
+}
+
+/// `path` with the `base_dir` prefix stripped, when it lies under it
+/// (both canonical); the full path otherwise. No allocation, so usable
+/// straight from a print.
+fn relativePath(base_dir: []const u8, path: []const u8) []const u8 {
+    if (path.len > base_dir.len and std.mem.startsWith(u8, path, base_dir) and path[base_dir.len] == std.fs.path.sep) {
+        return path[base_dir.len + 1 ..];
+    }
+    return path;
 }
