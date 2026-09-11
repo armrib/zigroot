@@ -57,8 +57,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 const Ast = Semantic.Ast;
 
 const Project = @import("Project.zig");

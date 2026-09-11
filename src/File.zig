@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
@@ -19,7 +19,7 @@ path: []const u8,
 /// Sentinel-terminated source text `semantic` was parsed from. Owned.
 /// Must outlive `semantic`.
 source: [:0]u8,
-semantic: zlint.Semantic,
+semantic: Semantic,
 /// Node -> containing-declaration map, built from `semantic`. See
 /// `OwnerMap`.
 owner_map: OwnerMap,
@@ -34,7 +34,7 @@ pub fn load(gpa: Allocator, id: FileId, path: []const u8) !File {
     const source = try readFileSentinel(gpa, path);
     errdefer gpa.free(source);
 
-    var builder = zlint.Semantic.Builder.init(gpa);
+    var builder = Semantic.Builder.init(gpa);
     defer builder.deinit();
 
     var result = try builder.build(source);

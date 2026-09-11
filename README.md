@@ -113,11 +113,10 @@ not taken.
 
 ## Build
 
-Requires Zig 0.15.x (ZLint is a package dependency pinned to a pre-0.16
-commit; see "Zig version" below).
+Requires Zig 0.15.x. No dependencies to fetch: the semantic layer is
+vendored under `src/semantic/` (see "Credits" below).
 
 ```sh
-zig build --fetch   # first time only, fetches ZLint (and its own deps)
 zig build test
 zig build
 ```
@@ -159,16 +158,12 @@ src/
   Scc.zig                     Tarjan SCC over the declaration graph
   BuildGraph.zig              build.zig module-name -> file resolution
   main.zig                    CLI
+  semantic/                   per-file semantic analysis (copied from ZLint, see below)
 ```
 
-ZLint itself is a `zig fetch`-managed package dependency (see
-`build.zig.zon`), not vendored in this tree.
+## Credits
 
-## Zig version
-
-ZLint's `main` branch moved to Zig 0.16's `Io`-threaded filesystem API
-(`Dir.readFile(dir, io, ...)`, etc.). To keep this scaffold on the more
-stable classic `std.fs` API, `build.zig.zon` pins the `zlint` dependency to
+The per-file semantic analysis under `src/semantic/` is copied from
+[ZLint](https://github.com/DonIsaac/zlint) by Don Isaac (MIT), commit
 [`8cbbb1c`](https://github.com/DonIsaac/zlint/commit/8cbbb1c9c48ebc091d9b230bb98355d53cc251ad),
-the last commit before that migration (targets Zig 0.15.x). Re-evaluate
-this pin before adding new ZLint-derived code.
+and modified. See `src/semantic/UPSTREAM.md` for the list of changes.

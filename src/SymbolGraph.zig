@@ -14,14 +14,13 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const FileId = @import("FileId.zig").FileId;
 const OwnerMap = @import("OwnerMap.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
 const InstanceType = @import("InstanceType.zig");
-const Semantic = zlint.Semantic;
 
 const SymbolGraph = @This();
 

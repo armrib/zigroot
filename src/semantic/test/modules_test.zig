@@ -1,8 +1,7 @@
 const std = @import("std");
 const test_util = @import("util.zig");
 
-const _source = @import("../../source.zig");
-const Semantic = @import("../../Semantic.zig");
+const Semantic = @import("../Semantic.zig");
 
 const t = std.testing;
 
@@ -117,32 +116,6 @@ test "@import non-string specifier does not add import entry" {
     try t.expect(result.hasErrors());
     // No import entry was recorded.
     try t.expectEqual(@as(usize, 0), result.value.modules.imports.items.len);
-}
-
-// ---------------------------------------------------------------------------
-// withSource is safe when called multiple times (no ArcStr leak)
-// ---------------------------------------------------------------------------
-
-test "withSource: multiple calls do not leak ArcStr" {
-    const a_src = try t.allocator.dupeZ(u8, "const x = 0;");
-    const a_path = try t.allocator.dupe(u8, "a.zig");
-    var a = try _source.Source.fromString(t.allocator, a_src, a_path);
-    defer a.deinit();
-
-    const b_src = try t.allocator.dupeZ(u8, "const y = 0;");
-    const b_path = try t.allocator.dupe(u8, "b.zig");
-    var b = try _source.Source.fromString(t.allocator, b_src, b_path);
-    defer b.deinit();
-
-    var builder = Semantic.Builder.init(t.allocator);
-    defer builder.deinit();
-
-    builder.withSource(&a);
-    builder.withSource(&b);
-
-    // Actually build something so the Semantic is well-formed for deinit.
-    var result = try builder.build(b.text());
-    defer result.deinit();
 }
 
 // ---------------------------------------------------------------------------

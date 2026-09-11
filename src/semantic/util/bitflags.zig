@@ -6,7 +6,7 @@ const meta = std.meta;
 ///
 /// ## Example
 /// ```zig
-/// const Bitflags = @import("util").Bitflags;
+/// const Bitflags = @import("../util.zig").Bitflags;
 ///
 /// const Position = packed struct {
 ///   s_top: bool = false,

@@ -2,8 +2,7 @@
 
 const std = @import("std");
 const t = std.testing;
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 const DynamicField = @import("DynamicField.zig");
 
 fn build(src: [:0]const u8) !Semantic {

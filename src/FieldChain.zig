@@ -27,8 +27,7 @@
 //! instead of `DynamicField` being a dead end after one hop.
 
 const std = @import("std");
-const zlint = @import("zlint");
-const Semantic = zlint.Semantic;
+const Semantic = @import("semantic/Semantic.zig");
 const DynamicField = @import("DynamicField.zig");
 const InstanceType = @import("InstanceType.zig");
 const OwnerMap = @import("OwnerMap.zig");

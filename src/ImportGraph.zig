@@ -8,17 +8,17 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const zlint = @import("zlint");
+const Semantic = @import("semantic/Semantic.zig");
 
 const FileId = @import("FileId.zig").FileId;
-const ImportKind = zlint.Semantic.ModuleRecord.ImportEntry.Kind;
+const ImportKind = Semantic.ModuleRecord.ImportEntry.Kind;
 
 const ImportGraph = @This();
 
 pub const Edge = struct {
     from: FileId,
     to: FileId,
-    node: zlint.Semantic.Ast.Node.Index,
+    node: Semantic.Ast.Node.Index,
 };
 
 pub const UnresolvedImport = struct {
@@ -26,7 +26,7 @@ pub const UnresolvedImport = struct {
     /// The raw `@import(...)` argument. Owned.
     specifier: []const u8,
     kind: ImportKind,
-    node: zlint.Semantic.Ast.Node.Index,
+    node: Semantic.Ast.Node.Index,
 };
 
 edges: std.ArrayListUnmanaged(Edge) = .empty,
@@ -52,7 +52,7 @@ pub fn deinit(self: *ImportGraph, gpa: Allocator) void {
     self.* = undefined;
 }
 
-pub fn addEdge(self: *ImportGraph, gpa: Allocator, from: FileId, to: FileId, node: zlint.Semantic.Ast.Node.Index) !void {
+pub fn addEdge(self: *ImportGraph, gpa: Allocator, from: FileId, to: FileId, node: Semantic.Ast.Node.Index) !void {
     const edge: Edge = .{ .from = from, .to = to, .node = node };
     try self.edges.append(gpa, edge);
     const gop = try self.adjacency.getOrPut(gpa, from);
@@ -76,7 +76,7 @@ pub fn addUnresolved(
     from: FileId,
     specifier: []const u8,
     kind: ImportKind,
-    node: zlint.Semantic.Ast.Node.Index,
+    node: Semantic.Ast.Node.Index,
 ) !void {
     try self.unresolved.append(gpa, .{
         .from = from,

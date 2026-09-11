@@ -116,11 +116,11 @@ const ParentIdsIterator = struct {
 
 const std = @import("std");
 const _ast = @import("ast.zig");
-const util = @import("util");
+const util = @import("util.zig");
 
 const Ast = _ast.Ast;
 const NodeIndex = _ast.NodeIndex;
-const Semantic = @import("../Semantic.zig");
+const Semantic = @import("Semantic.zig");
 const ROOT_NODE_ID = Semantic.ROOT_NODE_ID;
 const NULL_NODE = Semantic.NULL_NODE;
 const ROOT_SCOPE_ID = Semantic.ROOT_SCOPE_ID;
