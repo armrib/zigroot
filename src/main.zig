@@ -12,10 +12,15 @@
 //! `@import` boundary (Phase 15). A `build.zig` that defines a library
 //! and no executable is analyzed in library mode (every `pub` symbol is
 //! reachable API); otherwise `pub` alone doesn't make a symbol a root.
+//!
+//! Exit codes: 0 clean, 1 if any orphan file or dead declaration was
+//! found, 2 if the project couldn't be loaded or some file has parse
+//! errors (its symbol table is partial, so findings can't be trusted).
 
 const std = @import("std");
 const zigroot = @import("zigroot");
 const Project = zigroot.Project;
+const Semantic = zigroot.Semantic;
 
 pub fn main() !u8 {
     var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -24,22 +29,38 @@ pub fn main() !u8 {
 
     std.fs.cwd().access("build.zig", .{}) catch {
         std.debug.print("error: no 'build.zig' in the current directory; zigroot analyzes the project rooted here\n", .{});
-        return 1;
+        return 2;
     };
 
     var project: Project = .init(gpa);
     defer project.deinit();
 
-    var had_errors = false;
+    var had_findings = false;
 
     project.loadBuildGraph("build.zig") catch |err| {
         std.debug.print("error: failed to load build graph from 'build.zig': {s}\n", .{@errorName(err)});
-        had_errors = true;
+        return 2;
     };
 
     if (project.roots.items.len == 0) {
         std.debug.print("error: no roots found ('build.zig' defines no addExecutable/addLibrary/addTest root module)\n", .{});
-        return 1;
+        return 2;
+    }
+
+    const error_count = project.errorCount();
+    if (error_count > 0) {
+        std.debug.print("{d} parse error(s); findings below may be incomplete:\n", .{error_count});
+        for (project.files.items) |f| {
+            for (f.errors.items) |err| {
+                if (err.labels.items.len > 0) {
+                    const loc = Semantic.Location.fromSpan(f.source, err.labels.items[0].span);
+                    std.debug.print("  {s}:{d}:{d}: {s}\n", .{ f.path, loc.line, loc.column, err.message });
+                } else {
+                    std.debug.print("  {s}: {s}\n", .{ f.path, err.message });
+                }
+            }
+        }
+        std.debug.print("\n", .{});
     }
 
     const public_policy: zigroot.Roots.PublicPolicy = if (project.build_graph) |bg|
@@ -52,17 +73,38 @@ pub fn main() !u8 {
         project.roots.items.len,
     });
 
-    if (project.import_graph.unresolved.items.len > 0) {
-        std.debug.print("\n{d} unresolved import(s):\n", .{project.import_graph.unresolved.items.len});
+    var externals: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer externals.deinit(gpa);
+    var unresolved_count: usize = 0;
+    for (project.import_graph.unresolved.items) |u| {
+        switch (u.reason) {
+            .external => try externals.put(gpa, u.specifier, {}),
+            .unknown_module, .load_failed => unresolved_count += 1,
+            .not_a_zig_file => {},
+        }
+    }
+
+    if (externals.count() > 0) {
+        std.debug.print("\n{d} external module(s):", .{externals.count()});
+        for (externals.keys()) |name| std.debug.print(" {s}", .{name});
+        std.debug.print("\n", .{});
+    }
+
+    if (unresolved_count > 0) {
+        std.debug.print("\n{d} unresolved import(s):\n", .{unresolved_count});
         for (project.import_graph.unresolved.items) |u| {
+            switch (u.reason) {
+                .external, .not_a_zig_file => continue,
+                .unknown_module, .load_failed => {},
+            }
             const from_path = project.file(u.from).path;
-            std.debug.print("  {s}: @import(\"{s}\") [{s}]\n", .{ from_path, u.specifier, @tagName(u.kind) });
+            std.debug.print("  {s}: @import(\"{s}\") [{s}]\n", .{ from_path, u.specifier, @tagName(u.reason) });
         }
     }
 
     var discovered = project.discoverZigFiles(".") catch |err| {
         std.debug.print("error: failed to scan '.': {s}\n", .{@errorName(err)});
-        return 1;
+        return 2;
     };
     defer {
         for (discovered.items) |p| gpa.free(p);
@@ -80,7 +122,7 @@ pub fn main() !u8 {
         for (orphans.items) |path| {
             std.debug.print("  {s}\n", .{path});
         }
-        had_errors = true;
+        had_findings = true;
     } else {
         std.debug.print("\nno orphan files under '.'\n", .{});
     }
@@ -154,10 +196,11 @@ pub fn main() !u8 {
     }
 
     if (reported > 0) {
-        had_errors = true;
+        had_findings = true;
     } else {
         std.debug.print("\nno dead declarations found\n", .{});
     }
 
-    return if (had_errors) 1 else 0;
+    if (error_count > 0) return 2;
+    return if (had_findings) 1 else 0;
 }

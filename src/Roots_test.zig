@@ -357,3 +357,35 @@ test "pub symbols are only roots under PublicPolicy.root" {
     }
     try t.expect(found);
 }
+
+test "only a top-level main is the entry point, not an earlier parameter or local named main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\fn helper(main: u32) u32 {
+        \\    const panic = main;
+        \\    return panic;
+        \\}
+        \\pub fn main() void {
+        \\    _ = helper(1);
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), roots.roots.items.len);
+    const root_sym = project.symbol(roots.roots.items[0].symbol);
+    try t.expectEqualStrings("main", root_sym.name);
+    try t.expect(root_sym.flags.s_fn);
+    try t.expectEqual(Roots.RootKind.executable_entry, roots.roots.items[0].kind);
+}

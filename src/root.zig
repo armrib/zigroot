@@ -1,5 +1,7 @@
-//! zigroot: a whole-project reachability analyzer built above ZLint's
-//! single-file `Semantic` layer. See docs/architecture.md for the design.
+//! zigroot: a whole-project reachability analyzer built above a
+//! single-file `Semantic` layer (`semantic/`, derived from ZLint). See
+//! README.md's "Layout" section and CLAUDE.md's "Architecture" for the
+//! design.
 
 pub const Semantic = @import("semantic/Semantic.zig");
 
@@ -16,6 +18,7 @@ pub const DynamicField = @import("DynamicField.zig");
 pub const InstanceType = @import("InstanceType.zig");
 pub const Scc = @import("Scc.zig");
 pub const BuildGraph = @import("BuildGraph.zig");
+pub const ZonFile = @import("ZonFile.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -33,4 +36,5 @@ test {
     _ = @import("InstanceType_test.zig");
     _ = @import("Scc_test.zig");
     _ = @import("BuildGraph_test.zig");
+    _ = @import("ZonFile_test.zig");
 }

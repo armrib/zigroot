@@ -622,3 +622,51 @@ test "fields of an anonymous struct returned from a reachable function stay reac
     try t.expect(reachability.isReachable(.{ .file = main_id, .local = channel_id }));
     try t.expect(reachability.isReachable(.{ .file = main_id, .local = created }));
 }
+
+test "parameters, locals and fields are never findings of their own" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Config = struct {
+        \\    unused_field: u32 = 0,
+        \\    pub fn make() Config {
+        \\        return .{};
+        \\    }
+        \\};
+        \\fn f(param: u32, unused_param: u32) void {
+        \\    const local = param;
+        \\    const unused_local = 1;
+        \\    _ = local;
+        \\}
+        \\pub fn main() void {
+        \\    f(1, 2);
+        \\    _ = Config.make();
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    for (dead.items) |d| {
+        std.debug.print("unexpected finding: {s}\n", .{project.symbol(d.id).name});
+    }
+    try t.expectEqual(@as(usize, 0), dead.items.len);
+}

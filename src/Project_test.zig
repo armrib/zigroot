@@ -463,3 +463,205 @@ test "a .zig-suffixed named-module import consults build_graph instead of only g
     try t.expectEqual(@as(usize, 2), project.files.items.len);
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
+
+test "discoverZigFiles skips dot-directories and build.zig.zon path dependencies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "build.zig.zon",
+        \\.{
+        \\    .name = .app,
+        \\    .version = "0.0.0",
+        \\    .dependencies = .{
+        \\        .local_dep = .{ .path = "deps/local_dep" },
+        \\    },
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig", "pub fn main() void {}\n");
+    try writeFile(tmp.dir, ".zig-cache/o/abc/dependencies.zig", "pub const x = 1;\n");
+    try writeFile(tmp.dir, ".hidden/tool.zig", "pub const x = 1;\n");
+    try writeFile(tmp.dir, "deps/local_dep/src/root.zig", "pub fn api() void {}\n");
+    try writeFile(tmp.dir, "src/stray.zig", "pub const x = 1;\n");
+
+    const build_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_path);
+    const dir_path = try tmp.dir.realpathAlloc(t.allocator, ".");
+    defer t.allocator.free(dir_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_path);
+
+    try t.expect(project.zon.isDependency("local_dep"));
+    try t.expectEqual(@as(usize, 1), project.excluded_dirs.items.len);
+
+    var discovered = try project.discoverZigFiles(dir_path);
+    defer {
+        for (discovered.items) |p| t.allocator.free(p);
+        discovered.deinit(t.allocator);
+    }
+
+    // build.zig, src/main.zig, src/stray.zig — nothing under a dot-dir or
+    // the path dependency.
+    try t.expectEqual(@as(usize, 3), discovered.items.len);
+    for (discovered.items) |p| {
+        // Compare below the tmp dir: the tmp dir itself lives under the
+        // test runner's own `.zig-cache`.
+        const rel = p[dir_path.len..];
+        try t.expect(std.mem.indexOf(u8, rel, ".zig-cache") == null);
+        try t.expect(std.mem.indexOf(u8, rel, ".hidden") == null);
+        try t.expect(std.mem.indexOf(u8, rel, "local_dep") == null);
+    }
+}
+
+test "module imports are classified external (std, zon dependencies, b.dependency addImports) or unknown" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const dep = b.dependency("some_pkg", .{});
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("wired", dep.module("wired"));
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "build.zig.zon",
+        \\.{
+        \\    .name = .app,
+        \\    .version = "0.0.0",
+        \\    .dependencies = .{
+        \\        .some_pkg = .{ .url = "https://example.invalid/p.tar.gz", .hash = "some_pkg-1.0.0-abc" },
+        \\    },
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const std = @import("std");
+        \\const builtin = @import("builtin");
+        \\const pkg = @import("some_pkg");
+        \\const wired = @import("wired");
+        \\const mystery = @import("mystery");
+        \\const zon = @import("build.zig.zon");
+        \\pub fn main() void {
+        \\    _ = std;
+        \\    _ = builtin;
+        \\    _ = pkg;
+        \\    _ = wired;
+        \\    _ = mystery;
+        \\    _ = zon;
+        \\}
+        \\
+    );
+
+    const build_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_path);
+
+    try t.expectEqual(@as(usize, 1), project.files.items.len);
+
+    var external: usize = 0;
+    var unknown: usize = 0;
+    var not_zig: usize = 0;
+    for (project.import_graph.unresolved.items) |u| {
+        switch (u.reason) {
+            .external => external += 1,
+            .unknown_module => {
+                unknown += 1;
+                try t.expectEqualStrings("mystery", u.specifier);
+            },
+            .not_a_zig_file => {
+                not_zig += 1;
+                try t.expectEqualStrings("build.zig.zon", u.specifier);
+            },
+            .load_failed => return error.TestUnexpectedResult,
+        }
+    }
+    try t.expectEqual(@as(usize, 4), external);
+    try t.expectEqual(@as(usize, 1), unknown);
+    try t.expectEqual(@as(usize, 1), not_zig);
+}
+
+test "a file with a syntax error keeps its diagnostics instead of silently analyzing a partial symbol table" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\pub fn main() void {
+        \\    const x =
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+    try t.expect(project.file(file_id).errors.items.len > 0);
+    try t.expect(project.errorCount() > 0);
+    try t.expect(project.file(file_id).errors.items[0].labels.items.len > 0);
+}
+
+test "build.zig and the helper files it imports are not orphans" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\const helper = @import("build/helper.zig");
+        \\pub fn build(b: *std.Build) void {
+        \\    helper.wire(b);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "build/helper.zig",
+        \\const std = @import("std");
+        \\pub fn wire(b: *std.Build) void { _ = b; }
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig", "pub fn main() void {}\n");
+
+    const build_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_path);
+    const dir_path = try tmp.dir.realpathAlloc(t.allocator, ".");
+    defer t.allocator.free(dir_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_path);
+
+    var discovered = try project.discoverZigFiles(dir_path);
+    defer {
+        for (discovered.items) |p| t.allocator.free(p);
+        discovered.deinit(t.allocator);
+    }
+    try t.expectEqual(@as(usize, 3), discovered.items.len);
+    for (discovered.items) |p| try t.expect(project.isReachable(p));
+}

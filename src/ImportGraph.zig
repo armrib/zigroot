@@ -27,6 +27,24 @@ pub const UnresolvedImport = struct {
     specifier: []const u8,
     kind: ImportKind,
     node: Semantic.Ast.Node.Index,
+    reason: Reason,
+
+    pub const Reason = enum {
+        /// A module the project doesn't own: `std`, `builtin`, `root`, a
+        /// `build.zig.zon` dependency, or a name `build.zig` wires in via
+        /// `addImport` from a `b.dependency(...)`. Never a configuration
+        /// gap, and never a source of roots — a reachability sink.
+        external,
+        /// A named module nothing in `build.zig`/`build.zig.zon` accounts
+        /// for. A real configuration gap worth reporting.
+        unknown_module,
+        /// `@import("foo.c")`, `@import("build.zig.zon")`: not a `.zig`
+        /// file, so there's nothing to analyze.
+        not_a_zig_file,
+        /// A `.zig` file that couldn't be read or parsed at the resolved
+        /// path.
+        load_failed,
+    };
 };
 
 edges: std.ArrayListUnmanaged(Edge) = .empty,
@@ -77,12 +95,14 @@ pub fn addUnresolved(
     specifier: []const u8,
     kind: ImportKind,
     node: Semantic.Ast.Node.Index,
+    reason: UnresolvedImport.Reason,
 ) !void {
     try self.unresolved.append(gpa, .{
         .from = from,
         .specifier = try gpa.dupe(u8, specifier),
         .kind = kind,
         .node = node,
+        .reason = reason,
     });
 }
 
