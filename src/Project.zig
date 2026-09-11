@@ -372,9 +372,12 @@ pub fn file(self: *const Project, id: FileId) *const File {
     return &self.files.items[id.index()];
 }
 
-/// Resolves a project-wide `SymbolId` to the ZLint symbol it identifies.
-pub fn symbol(self: *const Project, id: SymbolId) *const Semantic.Symbol {
-    return self.file(id.file).semantic.symbols.get(id.local);
+/// Resolves a project-wide `SymbolId` to a copy of the ZLint symbol it
+/// identifies. By value: `Symbol.Table.get` hands out a pointer to a
+/// temporary copy (its table is a `MultiArrayList`), only valid for the
+/// statement that made it.
+pub fn symbol(self: *const Project, id: SymbolId) Semantic.Symbol {
+    return self.file(id.file).semantic.symbols.symbols.get(id.local.into(usize));
 }
 
 /// True iff some configured root transitively imports `path`, or it's one

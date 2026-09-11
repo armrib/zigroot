@@ -164,26 +164,6 @@ pub fn resolve(self: *const BuildGraph, name: []const u8) ?[]const []const u8 {
     return paths.items;
 }
 
-/// Parses `source` (a `build.zig`'s contents) and extracts its local
-/// module bindings. `source` need not be error-free; a `build.zig` with
-/// parse errors just yields an empty or partial graph. Doesn't follow
-/// local `@import("*.zig")`s into sibling files — see `parseInto` for
-/// that (this is a thin single-file wrapper around it, kept for callers
-/// — and existing tests — that only care about one file).
-pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
-    var result: BuildGraph = .empty;
-    errdefer result.deinit(gpa);
-
-    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
-    defer {
-        for (file_imports.items) |p| gpa.free(p);
-        file_imports.deinit(gpa);
-    }
-
-    try parseInto(gpa, &result, source, &file_imports, null);
-    return result;
-}
-
 /// Scans `source` and merges the local module bindings it defines into
 /// `result`, which may already hold bindings merged in from another file
 /// in the same build script's local-`@import` chain (see

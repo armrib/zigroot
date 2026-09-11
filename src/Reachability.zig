@@ -186,7 +186,7 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
 /// and enum tags, and the `_` discard.
 pub fn isReportable(project: *const Project, id: SymbolId) bool {
     const f = project.file(id.file);
-    const sym = f.semantic.symbols.get(id.local);
+    const sym = project.symbol(id);
     if (sym.name.len == 0 or std.mem.eql(u8, sym.name, "_")) return false;
     if (sym.flags.s_fn_param or sym.flags.s_payload or sym.flags.s_catch_param or sym.flags.s_member) return false;
     if (!(sym.flags.s_fn or sym.flags.s_const or sym.flags.s_variable)) return false;

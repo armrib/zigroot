@@ -4,8 +4,22 @@ const std = @import("std");
 const t = std.testing;
 const BuildGraph = @import("BuildGraph.zig");
 
+/// `BuildGraph.parseInto` over one source string, discarding the
+/// local-file imports it collects.
+fn parse(source: [:0]const u8) !BuildGraph {
+    var graph: BuildGraph = .empty;
+    errdefer graph.deinit(t.allocator);
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| t.allocator.free(p);
+        file_imports.deinit(t.allocator);
+    }
+    try BuildGraph.parseInto(t.allocator, &graph, source, &file_imports, null);
+    return graph;
+}
+
 test "resolves a locally-created module bound with addImport" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const storage_mod = b.createModule(.{
@@ -27,7 +41,7 @@ test "resolves a locally-created module bound with addImport" {
 }
 
 test "resolves a module published with b.addModule, with no further addImport/.imports wiring" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    _ = b.addModule("storage", .{
@@ -49,7 +63,7 @@ test "resolves a module published with b.addModule, with no further addImport/.i
 }
 
 test "resolves a module published with b.addModule and wired into another module's inline .imports" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const compiler_mod = b.addModule("db_compiler", .{
@@ -76,7 +90,7 @@ test "resolves a module published with b.addModule and wired into another module
 }
 
 test "resolves a module bound with addAnonymousImport, whose module and options are inline" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const bench_mod = b.createModule(.{ .root_source_file = b.path("src/bench_runner.zig") });
@@ -94,7 +108,7 @@ test "resolves a module bound with addAnonymousImport, whose module and options 
 }
 
 test "a module sourced from a dependency stays unresolved" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const dep = b.dependency("zlint", .{});
@@ -112,7 +126,7 @@ test "a module sourced from a dependency stays unresolved" {
 }
 
 test "resolves a module bound via an inline .imports field" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const myiam_mod = b.createModule(.{
@@ -138,7 +152,7 @@ test "resolves a module bound via an inline .imports field" {
 }
 
 test "resolves a module whose root_source_file goes through a b.path pass-through helper" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\fn srcPath(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
         \\    return b.path(sub_path);
@@ -163,7 +177,7 @@ test "resolves a module whose root_source_file goes through a b.path pass-throug
 }
 
 test "resolves a module whose root_source_file goes through a b.path pass-through helper with a leading validation statement" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\fn srcPath(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
         \\    b.build_root.handle.access(sub_path, .{}) catch |err| std.debug.panic(
@@ -192,7 +206,7 @@ test "resolves a module whose root_source_file goes through a b.path pass-throug
 }
 
 test "resolves a module whose root_source_file is a direct .cwd_relative LazyPath literal" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const foo = b.createModule(.{
@@ -214,7 +228,7 @@ test "resolves a module whose root_source_file is a direct .cwd_relative LazyPat
 }
 
 test "resolves a module whose root_source_file is .{ .cwd_relative = b.pathFromRoot(...) }" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const foo = b.createModule(.{
@@ -236,7 +250,7 @@ test "resolves a module whose root_source_file is .{ .cwd_relative = b.pathFromR
 }
 
 test "an addImport of an unrelated identifier is ignored, not crashing" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const target = b.standardTargetOptions(.{});
@@ -254,7 +268,7 @@ test "an addImport of an unrelated identifier is ignored, not crashing" {
 }
 
 test "an import name addImport'd once per OS branch keeps every candidate" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const linux_mod = b.createModule(.{
@@ -383,7 +397,7 @@ test "parseInto resolves a call to a cross-file-import-aliased helper via the gi
 }
 
 test "records a b.addTest root_module bound to a local createModule variable as a test root" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const test_mod = b.createModule(.{
@@ -401,7 +415,7 @@ test "records a b.addTest root_module bound to a local createModule variable as 
 }
 
 test "records a b.addTest with an inline root_module createModule as a test root" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const t = b.addTest(.{
@@ -418,7 +432,7 @@ test "records a b.addTest with an inline root_module createModule as a test root
 }
 
 test "records a b.addTest using the older root_source_file shape as a test root" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const t = b.addTest(.{ .root_source_file = b.path("src/tests/test_path.zig") });
@@ -433,7 +447,7 @@ test "records a b.addTest using the older root_source_file shape as a test root"
 }
 
 test "records a b.addExecutable inline root_module createModule as an exe root" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const exe = b.addExecutable(.{
@@ -451,7 +465,7 @@ test "records a b.addExecutable inline root_module createModule as an exe root" 
 }
 
 test "records a b.addLibrary root_module bound to a local createModule variable as an exe root" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const lib_mod = b.createModule(.{
@@ -469,7 +483,7 @@ test "records a b.addLibrary root_module bound to a local createModule variable 
 }
 
 test "a local variable name reused across sibling blocks doesn't leak the shadowed binding" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\pub fn build(b: *std.Build) void {
         \\    const exe = b.addExecutable(.{
@@ -495,7 +509,7 @@ test "a local variable name reused across sibling blocks doesn't leak the shadow
 }
 
 test "resolves an addImport value that's a field access into a helper's returned modules struct" {
-    var graph = try BuildGraph.parse(t.allocator,
+    var graph = try parse(
         \\const std = @import("std");
         \\const Mods = struct { foo: *std.Build.Module };
         \\

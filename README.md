@@ -26,12 +26,12 @@ Status: Phase 0-16. Implemented so far:
   mapping every symbol's already-resolved incoming references through
   `OwnerMap` (`src/SymbolGraph.zig`). `File` builds one alongside
   its `semantic` and `OwnerMap`.
-- `Roots`: automatic reachability roots — each root file's `main`
-  (`executable_entry`), every `export`ed symbol (`.export`), every symbol
-  referenced from a `test { ... }` block (`.test`, since ZLint gives `test`
-  blocks no symbol identity of their own to make a root out of directly),
-  and, under `PublicPolicy.root` (library mode, auto-detected when
-  `build.zig` defines a library and no executable), every `pub` symbol
+- `Roots`: automatic reachability roots — each root file's top-level
+  `main` (`executable_entry`), every `export`ed symbol (`.export`), every
+  symbol a container-level `comptime { ... }` block references
+  (`.comptime_block`), and, under `PublicPolicy.root` (library mode,
+  auto-detected when `build.zig` defines a library and no executable),
+  every `pub` symbol
   (`.public_api`) (`src/Roots.zig`).
 - `extern` declarations are excluded from `deadSymbols` — their
   implementation lives outside the project, so local reachability can't
@@ -79,29 +79,47 @@ Status: Phase 0-16. Implemented so far:
   `SymbolGraph`). `Resolver` extends this across an `@import` boundary too:
   `var s: storage.Widget = ...; s.run();` resolves `storage.Widget` into the
   target file's exports the same way `storage.foo()` does, then chains `s`'s
-  own references the same way. `Roots`' `.test`-root case resolves instance
-  types too, both same-file and cross-file, so an instance-method call in a
-  `test { ... }` block seeds reachability from the method the same way a
-  static `Foo.run()` call in a test already did. `InstanceType` also reads a
-  function *parameter*'s declared type the same way, so `self`-receiver
-  methods (`fn visit(self: *Foo) void { self.run(); }`) resolve `self.run()`
-  the same way a locally-declared `var s: Foo` does — same-file and across
-  an `@import` boundary, both through `SymbolGraph`/`Resolver` and `Roots`'
-  `.test`-root case.
-- `Roots`' `.test`-root case also covers a test body referencing an
-  `@import` binding directly (`const tester = @import("tester.zig"); test {
-  tester.init(); }`) and `var runner = tester.init(); runner.run();` inside
-  a test body — both shapes a reference inside a `test { ... }` block has
-  no owning symbol for, so `Resolver`'s cross-file graph-building (keyed on
-  that owner) skips them entirely; `Roots` resolves the target directly
-  instead, reusing `Resolver`'s `callInstanceType` for the latter shape
-  (`src/Roots.zig`, `src/Resolver.zig`).
+  own references the same way. `InstanceType` also reads a function
+  *parameter*'s declared type the same way, so `self`-receiver methods
+  (`fn visit(self: *Foo) void { self.run(); }`) resolve `self.run()` the
+  same way a locally-declared `var s: Foo` does.
+- Value aliases and decl literals: `const Project = zigroot.Project;`
+  (itself a re-export of `@import("Project.zig")` elsewhere), `const FileId
+  = @import("FileId.zig").FileId;`, `const Mixin = util.Bitflags(Flags);`
+  are followed to whatever they name, across as many files as it takes,
+  wherever a chain lands on one — as a hop base, a declared type, or a
+  call's return type. `var p: Project = .init(gpa);` / `return .empty;` /
+  `field: T = .none` resolve the literal against the type written on the
+  enclosing declaration (`src/DeclLiteral.zig`). `const semantic =
+  &project.file(id).semantic;` takes the declared type of what the chain
+  lands on. Intermediate hops (`Inner` in `Outer.Inner.run()`) count as
+  used, not just the chain's end.
+- Test code doesn't count as use. A declaration only a `test { ... }`
+  block references is dead; an `@import` written inside a test block is
+  not followed, and the target (plus whatever only it imports, and every
+  `b.addTest` root module) is a *test-only file* — listed, never analyzed,
+  never an orphan. A plain alias only tests reference (`const t =
+  std.testing;`) is scaffolding, not a finding. Container-level `comptime {
+  _ = x; }` blocks do seed roots.
+- Only declarations are findings: a `fn`/`const`/`var` declared directly
+  in a container. Parameters, locals, captures and container fields fold
+  into a dead parent's `(+N nested)` count instead.
+- `build.zig.zon` (`src/ZonFile.zig`): dependency names are external
+  modules (never dead, never an "unresolved import"), and `.path`
+  dependencies are excluded from orphan discovery. `std`/`builtin`/`root`
+  and any `addImport` name `build.zig` binds to a `b.dependency(...)`
+  module are external too; only genuinely unaccounted-for imports are
+  printed as unresolved.
+- Parse errors are surfaced (`path:line:col: message`) and exit 2: a file
+  with syntax errors has a partial symbol table, so its findings can't be
+  trusted.
 
-Not yet implemented: an instance type named through a same-file chain
-*before* crossing an `@import` boundary (`var s: mod.storage.Widget =
-...`), a nested `const Self = @This();` alias (only the file-top-level case
-resolves), and a few other gaps found by running against a real codebase.
-See `issues/` for the full list.
+Not handled, by design: real type inference for instance-method calls
+(`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
+generic instantiation tracking beyond a `type`-returning function's own
+`return struct { ... }`, `@embedFile`/`@cImport`, and `build.zig` shapes
+that need the script actually evaluated (a custom module-registry helper
+struct, say) rather than scanned.
 
 `BuildGraph` doesn't evaluate `build.zig`'s control flow (that would mean
 actually running it), so it can't tell which branch of a per-target file
@@ -130,12 +148,23 @@ zigroot
 
 zigroot takes no arguments. Run it from a directory containing a
 `build.zig`; it loads that `build.zig`'s `addExecutable`/`addLibrary`/
-`addTest` root modules as project roots, resolves the named-module
-`@import(...)`s it wires up via `b.createModule(...)` + `.addImport(...)`,
-and scans `.` for orphan `.zig` files. A `build.zig` that defines a library
-and no executable is analyzed in library mode (every `pub` symbol counts as
-reachable API); otherwise `pub` alone doesn't make a symbol a root. Exits
-non-zero if any orphan files or dead declarations are found.
+`addModule` root modules as project roots (and `addTest` roots only to
+classify test-only files), resolves the named-module `@import(...)`s it
+wires up via `b.createModule(...)` + `.addImport(...)`, reads
+`build.zig.zon` for external dependencies, and scans `.` for orphan `.zig`
+files. A `build.zig` that defines a library (`addLibrary` or `addModule`)
+and no executable is analyzed in library mode (every `pub` symbol counts
+as reachable API); otherwise `pub` alone doesn't make a symbol a root.
+
+Output, in order: parse errors, external modules, unresolved imports,
+test-only files, orphan files, dead declarations
+(`path:line:col: kind name`, sorted by file and line, a dead cycle
+collapsed into one line), and possibly-dead declarations (only reached
+through a runtime-named `@field(...)`). Paths are relative to the
+`build.zig` directory.
+
+Exit codes: 0 clean, 1 if any orphan file or dead declaration was found,
+2 if the project couldn't be loaded or some file has parse errors.
 
 ## Layout
 
@@ -149,14 +178,18 @@ src/
   SymbolId.zig                project-wide symbol identity
   OwnerMap.zig                node -> containing-declaration map
   SymbolGraph.zig             same-file Symbol -> Symbol reference edges
-  Roots.zig                   automatic reachability roots (main, export, test, pub policy)
+  Roots.zig                   automatic reachability roots (main, export, comptime, pub policy)
   Reachability.zig            BFS over SymbolGraph + Resolver edges from Roots
   Resolver.zig                cross-file Symbol -> Symbol edges via @import
   FieldChain.zig              Foo.bar() / Outer.Inner.run() export-chain resolution
   DynamicField.zig            @field(Foo, name) resolution (comptime + runtime name)
   InstanceType.zig            locally-typed variable -> declared-type symbol resolution
+  DeclLiteral.zig             .init(...) / return .empty -> expected-type member resolution
   Scc.zig                     Tarjan SCC over the declaration graph
+  Report.zig                  findings with path:line:col, cycles collapsed
   BuildGraph.zig              build.zig module-name -> file resolution
+  ZonFile.zig                 build.zig.zon dependency names and path dependencies
+  self_test.zig               integration test: analyzes this repo, pins the expected findings
   main.zig                    CLI
   semantic/                   per-file semantic analysis (copied from ZLint, see below)
 ```

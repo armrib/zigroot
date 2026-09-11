@@ -11,6 +11,12 @@
 //!   binary regardless of internal references.
 //! - `.public_api`: every `pub` symbol, but only under `PublicPolicy.root`
 //!   (library mode) — see `PublicPolicy`.
+//! - `.comptime_block`: every symbol referenced from a container-level
+//!   `comptime { ... }` block (`comptime { _ = Foo; }`, the idiom for
+//!   forcing analysis of a declaration). Zig evaluates such a block
+//!   whenever the container is analyzed, so what it references is used,
+//!   even though — like a `test` block — the block has no symbol of its
+//!   own for `OwnerMap` to attribute the reference to.
 //!
 //! Test code deliberately seeds nothing. A `test { ... }` block has no
 //! symbol identity of its own (see `Builder.zig`'s `test_decl` handling),
@@ -25,10 +31,11 @@ const Semantic = @import("semantic/Semantic.zig");
 
 const Project = @import("Project.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
+const FieldChain = @import("FieldChain.zig");
 
 const Roots = @This();
 
-pub const RootKind = enum { executable_entry, @"export", public_api };
+pub const RootKind = enum { executable_entry, @"export", public_api, comptime_block };
 
 /// Whether `pub` alone makes a symbol a root.
 ///
@@ -89,8 +96,34 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             if (public_policy == .root and sym.visibility == .public) {
                 try roots.add(gpa, .{ .file = f.id, .local = local }, .public_api);
             }
+
+            // A reference no declaration owns sits in a container-level
+            // block: a `test` (which seeds nothing) or a `comptime` block.
+            var ref_it = semantic.symbols.iterReferences(local);
+            while (ref_it.next()) |ref| {
+                if (f.owner_map.get(ref.node) != null) continue;
+                if (isInTestScope(semantic, ref.scope)) continue;
+                try roots.add(gpa, .{ .file = f.id, .local = local }, .comptime_block);
+                const chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, local, ref.node, .definite);
+                for (chain.visitedSlice()) |through| {
+                    try roots.add(gpa, .{ .file = f.id, .local = through }, .comptime_block);
+                }
+                if (chain.result.symbol != local) {
+                    try roots.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, .comptime_block);
+                }
+            }
         }
     }
 
     return roots;
+}
+
+/// True if `scope_id`, or any of its ancestors, was created by a `test`
+/// block.
+fn isInTestScope(semantic: *const Semantic, scope_id: Semantic.Scope.Id) bool {
+    var it = semantic.scopes.iterParents(scope_id);
+    while (it.next()) |id| {
+        if (semantic.scopes.getScope(id).flags.s_test) return true;
+    }
+    return false;
 }
