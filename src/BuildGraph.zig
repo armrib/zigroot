@@ -43,6 +43,16 @@ modules: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty
 /// loaded file does. Owned.
 test_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 
+/// Root source file paths (relative to the `build.zig`'s directory) of
+/// every `b.addExecutable(.{ ... })` / `b.addLibrary(.{ ... })` call
+/// found — same `.root_module`/`.root_source_file` extraction as
+/// `test_roots`, but for a project's compiled artifacts rather than its
+/// standalone test binaries. `Project` loads each of these as if it were
+/// a `--root` too, so a `build.zig`-driven run with no explicit `--root`
+/// still reaches an executable's `main` (or a library's exports) instead
+/// of reporting the whole thing orphaned. Owned.
+exe_roots: std.ArrayListUnmanaged([]const u8) = .empty,
+
 pub const empty: BuildGraph = .{};
 
 /// Resolves a cross-file helper call site's callee (`<local-file-alias>.
@@ -100,6 +110,8 @@ pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     self.modules.deinit(gpa);
     for (self.test_roots.items) |path| gpa.free(path);
     self.test_roots.deinit(gpa);
+    for (self.exe_roots.items) |path| gpa.free(path);
+    self.exe_roots.deinit(gpa);
     self.* = undefined;
 }
 
@@ -243,6 +255,16 @@ pub fn parseInto(
                 if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
                     errdefer gpa.free(path);
                     try result.test_roots.append(gpa, path);
+                }
+            }
+            continue;
+        }
+
+        if (std.mem.eql(u8, field, "addExecutable") or std.mem.eql(u8, field, "addLibrary")) {
+            if (call.ast.params.len >= 1) {
+                if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
+                    errdefer gpa.free(path);
+                    try result.exe_roots.append(gpa, path);
                 }
             }
             continue;
@@ -426,7 +448,8 @@ fn cwdRelativePathToken(tree: *const Ast, node: Ast.Node.Index) ?Ast.TokenIndex 
     return null;
 }
 
-/// If `options` (a `b.addTest(.{ ... })` call's first argument) is either
+/// If `options` (a `b.addTest(.{ ... })` / `b.addExecutable(.{ ... })` /
+/// `b.addLibrary(.{ ... })` call's first argument) is either
 /// the older `.{ .root_source_file = b.path("...") }` shape (delegated to
 /// `rootSourceFileFromOptions`) or the current `.{ .root_module = <module>
 /// }` shape — `<module>` a local variable bound to a `createModule` call

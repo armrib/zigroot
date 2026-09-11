@@ -65,29 +65,39 @@ pub fn main() !u8 {
         }
     }
 
-    if (opts.roots.items.len == 0) {
-        std.debug.print(
-            \\usage: zigroot --root <file.zig> [--root <file.zig> ...] [--dir <path>]
-            \\
-            \\  --root     a project entry point; followed transitively through
-            \\             @import("*.zig")
-            \\  --dir      directory to scan for orphan .zig files (default: ".")
-            \\  --library  treat every `pub` symbol as reachable library API
-            \\             (default: executable mode, where `pub` alone
-            \\             doesn't make a symbol a root)
-            \\  --include-possible
-            \\             also report declarations only reachable through
-            \\             an unresolved dynamic access (e.g. `@field(Foo,
-            \\             name)` with a runtime name) as dead, instead of
-            \\             giving them the benefit of the doubt
-            \\  --build-zig <build.zig>
-            \\             resolve named-module @import(...)s (e.g.
-            \\             @import("storage")) that build.zig wires up via
-            \\             b.createModule(...) + .addImport(...), instead
-            \\             of leaving them unresolved
-            \\
-        , .{});
-        return 1;
+    // No explicit `--root`/`--build-zig`: only auto-run against a
+    // `build.zig` in the current directory (its `addExecutable`/
+    // `addLibrary`/`addTest` root modules become the roots); otherwise
+    // there's nothing to derive roots from, and `--root` is required.
+    if (opts.roots.items.len == 0 and opts.build_zig == null) {
+        std.fs.cwd().access("build.zig", .{}) catch {
+            std.debug.print(
+                \\usage: zigroot --root <file.zig> [--root <file.zig> ...] [--dir <path>]
+                \\
+                \\  --root     a project entry point; followed transitively through
+                \\             @import("*.zig")
+                \\  --dir      directory to scan for orphan .zig files (default: ".")
+                \\  --library  treat every `pub` symbol as reachable library API
+                \\             (default: executable mode, where `pub` alone
+                \\             doesn't make a symbol a root)
+                \\  --include-possible
+                \\             also report declarations only reachable through
+                \\             an unresolved dynamic access (e.g. `@field(Foo,
+                \\             name)` with a runtime name) as dead, instead of
+                \\             giving them the benefit of the doubt
+                \\  --build-zig <build.zig>
+                \\             resolve named-module @import(...)s (e.g.
+                \\             @import("storage")) that build.zig wires up via
+                \\             b.createModule(...) + .addImport(...), instead
+                \\             of leaving them unresolved
+                \\
+                \\With no --root and no --build-zig, a 'build.zig' in the
+                \\current directory is used automatically.
+                \\
+            , .{});
+            return 1;
+        };
+        opts.build_zig = "build.zig";
     }
 
     var project: Project = .init(gpa);
@@ -108,6 +118,11 @@ pub fn main() !u8 {
             had_errors = true;
             continue;
         };
+    }
+
+    if (project.roots.items.len == 0) {
+        std.debug.print("error: no roots found (pass --root explicitly, or run from a directory whose build.zig defines addExecutable/addLibrary/addTest root modules)\n", .{});
+        return 1;
     }
 
     std.debug.print("loaded {d} file(s) reachable from {d} root(s)\n", .{

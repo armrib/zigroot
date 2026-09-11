@@ -109,6 +109,16 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
         defer self.gpa.free(target_path);
         _ = self.addRoot(target_path) catch continue;
     }
+
+    // Same treatment for `addExecutable`/`addLibrary` root modules: load
+    // each as if it were a `--root` so a build.zig-driven run reaches an
+    // executable's `main` (or a library's exports) without one having to
+    // be passed explicitly.
+    for (graph.exe_roots.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        _ = self.addRoot(target_path) catch continue;
+    }
 }
 
 /// Scans one `build.zig` (or a file it locally `@import`s) into `graph`,

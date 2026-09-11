@@ -432,6 +432,42 @@ test "records a b.addTest using the older root_source_file shape as a test root"
     try t.expectEqualStrings("src/tests/test_path.zig", graph.test_roots.items[0]);
 }
 
+test "records a b.addExecutable inline root_module createModule as an exe root" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    _ = exe;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.exe_roots.items.len);
+    try t.expectEqualStrings("src/main.zig", graph.exe_roots.items[0]);
+}
+
+test "records a b.addLibrary root_module bound to a local createModule variable as an exe root" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const lib_mod = b.createModule(.{
+        \\        .root_source_file = b.path("src/lib.zig"),
+        \\    });
+        \\    const lib = b.addLibrary(.{ .name = "mylib", .root_module = lib_mod });
+        \\    _ = lib;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.exe_roots.items.len);
+    try t.expectEqualStrings("src/lib.zig", graph.exe_roots.items[0]);
+}
+
 test "a local variable name reused across sibling blocks doesn't leak the shadowed binding" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");

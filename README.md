@@ -126,6 +126,12 @@ zig build
 zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
 ```
 
+With no `--root`/`--build-zig` given, zigroot looks for a `build.zig` in the
+current directory and, if found, uses it automatically: its
+`addExecutable`/`addLibrary`/`addTest` root modules become the roots (same as
+`--build-zig`), and `.` is scanned for orphans. If no `build.zig` is found,
+`--root` is required.
+
 - `--root <file.zig>`: a project entry point, followed transitively through
   `@import("*.zig")`. Repeatable.
 - `--dir <path>`: directory to scan for orphan `.zig` files (default `.`).
@@ -133,7 +139,8 @@ zig-out/bin/zigroot --root src/root.zig --root src/main.zig --dir src
   executable mode, where `pub` alone doesn't make a symbol a root).
 - `--build-zig <build.zig>`: resolve named-module `@import(...)`s that
   `build.zig` wires up locally via `b.createModule(...)` +
-  `.addImport(...)`, instead of leaving them unresolved.
+  `.addImport(...)`, instead of leaving them unresolved. Also loads its
+  `addExecutable`/`addLibrary`/`addTest` root modules as roots.
 
 Exits non-zero if any orphan files are found.
 
