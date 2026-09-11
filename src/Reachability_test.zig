@@ -356,16 +356,21 @@ test "an anytype parameter of a dead function rolls up into its parent" {
     try t.expectEqual(@as(?usize, 1), found_parent);
 }
 
-test "a symbol only referenced from a test block is not reported dead" {
+test "a symbol only referenced from a test block is dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     try writeFile(tmp.dir, "main.zig",
         \\fn only_used_in_test() void {}
-        \\pub fn main() void {}
+        \\fn comptimeHelper() comptime_int { return 1; }
+        \\fn used() void {}
+        \\pub fn main() void { used(); }
         \\
         \\test "covers only_used_in_test" {
         \\    only_used_in_test();
+        \\    comptime {
+        \\        _ = comptimeHelper();
+        \\    }
         \\}
         \\
     );
@@ -388,7 +393,15 @@ test "a symbol only referenced from a test block is not reported dead" {
 
     const semantic = &project.file(file_id).semantic;
     const target = semantic.symbols.getSymbolNamed("only_used_in_test").?;
-    try t.expect(reachability.isReachable(.{ .file = file_id, .local = target }));
+    const helper = semantic.symbols.getSymbolNamed("comptimeHelper").?;
+    const used = semantic.symbols.getSymbolNamed("used").?;
+    try t.expect(!reachability.isReachable(.{ .file = file_id, .local = target }));
+    try t.expect(!reachability.isReachable(.{ .file = file_id, .local = helper }));
+    try t.expect(reachability.isReachable(.{ .file = file_id, .local = used }));
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 2), dead.items.len);
 }
 
 test "a symbol only reached via @field(Foo, name) is possibly, not definitely, reachable" {
