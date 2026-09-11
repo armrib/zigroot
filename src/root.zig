@@ -15,6 +15,7 @@ pub const Roots = @import("Roots.zig");
 pub const Reachability = @import("Reachability.zig");
 pub const Resolver = @import("Resolver.zig");
 pub const DynamicField = @import("DynamicField.zig");
+pub const DeclLiteral = @import("DeclLiteral.zig");
 pub const InstanceType = @import("InstanceType.zig");
 pub const Scc = @import("Scc.zig");
 pub const BuildGraph = @import("BuildGraph.zig");

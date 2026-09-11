@@ -21,6 +21,7 @@ const OwnerMap = @import("OwnerMap.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
 const InstanceType = @import("InstanceType.zig");
+const DeclLiteral = @import("DeclLiteral.zig");
 
 const SymbolGraph = @This();
 
@@ -61,10 +62,16 @@ pub fn deinit(self: *SymbolGraph, gpa: Allocator) void {
     self.* = undefined;
 }
 
+/// Adds `from -> to`. A duplicate (same `from`, `to` and `kind`, whatever
+/// the node) is dropped: several resolution passes can legitimately find
+/// the same edge, and one is all reachability needs.
 pub fn addEdge(self: *SymbolGraph, gpa: Allocator, from: SymbolId, to: SymbolId, node: Semantic.Ast.Node.Index, kind: EdgeKind) !void {
-    try self.edges.append(gpa, .{ .from = from, .to = to, .node = node, .kind = kind });
     const gop = try self.adjacency.getOrPut(gpa, from);
     if (!gop.found_existing) gop.value_ptr.* = .empty;
+    for (gop.value_ptr.items) |existing| {
+        if (existing.to.eql(to) and existing.kind == kind) return;
+    }
+    try self.edges.append(gpa, .{ .from = from, .to = to, .node = node, .kind = kind });
     try gop.value_ptr.append(gpa, .{ .to = to, .kind = kind });
 }
 
@@ -151,6 +158,19 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
         while (it.next()) |id| decl_index.putAssumeCapacity(semantic.symbols.get(id).decl, id);
     }
 
+    // Phase 30: `var p: Foo = .init(gpa);` / `return .empty;` — a decl
+    // literal names a member of whatever type its position expects (see
+    // `DeclLiteral`), and ZLint records no reference for it. Resolved here
+    // when that type is spelled same-file; `Resolver` handles the rest.
+    for (0..semantic.nodes().len) |i| {
+        const node: Semantic.Ast.Node.Index = @enumFromInt(i);
+        const literal = DeclLiteral.at(semantic, owner_map, node) orelse continue;
+        const owner = owner_map.get(node) orelse continue;
+        const ty = InstanceType.resolveTypeExpr(semantic, owner_map, literal.type_node) orelse continue;
+        const target = FieldChain.findExport(semantic, owner_map, ty, literal.name) orelse continue;
+        try graph.addEdge(gpa, .{ .file = file, .local = owner }, .{ .file = file, .local = target }, node, .possible);
+    }
+
     var sym_it = semantic.symbols.iter();
     while (sym_it.next()) |sym_id| {
         const instance_ty = InstanceType.resolve(semantic, owner_map, sym_id);
@@ -169,6 +189,9 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
                 };
                 try graph.addEdge(gpa, owner_id, .{ .file = file, .local = chain.result.symbol }, chain.result.node, kind);
             }
+            for (chain.visitedSlice()) |through| {
+                try graph.addEdge(gpa, owner_id, .{ .file = file, .local = through }, ref.node, .possible);
+            }
             if (chain.unknown) |unknown| for (unknown.exports) |target| {
                 try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);
             };
@@ -177,6 +200,9 @@ pub fn build(gpa: Allocator, file: FileId, semantic: *const Semantic, owner_map:
                 const inst_chain = FieldChain.resolveChain(semantic, semantic, owner_map, ty, ref.node, .possible);
                 if (inst_chain.result.symbol != ty) {
                     try graph.addEdge(gpa, owner_id, .{ .file = file, .local = inst_chain.result.symbol }, inst_chain.result.node, .possible);
+                }
+                for (inst_chain.visitedSlice()) |through| {
+                    try graph.addEdge(gpa, owner_id, .{ .file = file, .local = through }, ref.node, .possible);
                 }
                 if (inst_chain.unknown) |unknown| for (unknown.exports) |target| {
                     try graph.addEdge(gpa, owner_id, .{ .file = file, .local = target }, unknown.node, .unknown);

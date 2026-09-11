@@ -54,6 +54,18 @@
 //! `@import(...)` call — `aliasRoot` detects this and resolves every
 //! reference to the binding (further field hops and bare uses alike)
 //! against that export instead of the target file's root.
+//!
+//! Phase 30: value aliases and decl literals. `const Project =
+//! zigroot.Project;` (where `zigroot.Project` is itself `pub const Project
+//! = @import("Project.zig")` in another file) is a plain `const` with no
+//! exports of its own; a chain that lands on it (`var p: Project = ...;
+//! p.load()`, `Project.init(...)`) is finished by `resolveAlias`, which
+//! resolves the alias's initializer through `resolveValueChain` — now also
+//! understanding a bare `@import(...)` call as the target file's root — and
+//! resumes the walk wherever that lands, however many files away.
+//! `buildDeclLiterals` gives `var p: Project = .init(gpa);` /
+//! `return .empty;` (see `DeclLiteral`) the same cross-file treatment
+//! `SymbolGraph` gives them same-file.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -69,6 +81,7 @@ const FieldChain = @import("FieldChain.zig");
 const DynamicField = @import("DynamicField.zig");
 const InstanceType = @import("InstanceType.zig");
 const OwnerMap = @import("OwnerMap.zig");
+const DeclLiteral = @import("DeclLiteral.zig");
 
 /// Every file's top-level declarations are exported from this symbol.
 /// ZLint's `SemanticBuilder.enterRoot` always creates it first, so its id is
@@ -102,6 +115,10 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
                 const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, import_root, field_name) orelse continue;
                 const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+                // The export named right after the boundary is referenced
+                // whether or not the chain continues past it (`zigroot.Roots`
+                // in `zigroot.Roots.build(...)`).
+                try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target_local }, field_node, .definite);
                 try addChain(project, &graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target_local, field_node, .definite);
                 continue;
             }
@@ -110,6 +127,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
                 switch (resolution) {
                     .possible => |target| {
                         const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+                        try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = target }, field_node, .possible);
                         try addChain(project, &graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, target, field_node, .possible);
                     },
                     .unknown => |exports| for (exports) |target| {
@@ -132,8 +150,92 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     try buildInstanceTypes(gpa, &graph, project);
     try buildCallInstanceTypes(gpa, &graph, project);
     try buildStuckFieldChains(gpa, &graph, project);
+    try buildDeclLiterals(gpa, &graph, project);
+    try buildAliasEdges(gpa, &graph, project);
 
     return graph;
+}
+
+/// Phase 30: using a value alias uses what it names. `const NominalId =
+/// util.NominalId;` referenced bare (`NominalId(u32, ...)`) never goes
+/// through a `.field` hop that could resolve it, so the alias symbol is
+/// reached but its target never is. One edge per alias — `@import`
+/// bindings included, so a file used as a namespace also reaches its
+/// root (and, through `SymbolGraph`'s container→field edges, the types its
+/// top-level fields are declared with).
+fn buildAliasEdges(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        var sym_it = file.semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            if (FieldChain.valueAliasInit(&file.semantic, sym_id, .{ .allow_call = true }) == null) continue;
+            const alias: SymbolId = .{ .file = file.id, .local = sym_id };
+            const target = resolveAlias(project, alias) orelse continue;
+            if (target.eql(alias)) continue;
+            try graph.addEdge(gpa, alias, target, file.semantic.symbols.get(sym_id).decl, .definite);
+        }
+    }
+}
+
+/// Phase 30: the cross-file half of `SymbolGraph.build`'s decl-literal
+/// handling. For every `.name` literal whose expected type is spelled out
+/// (see `DeclLiteral.at`), resolves that type expression across `@import`
+/// boundaries and aliases (`resolveTypeNode`), then looks `name` up on it
+/// the same way any `container.member` hop does. Literals `SymbolGraph`
+/// already resolved same-file get a duplicate edge, which is harmless.
+fn buildDeclLiterals(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        const semantic = &file.semantic;
+        for (0..semantic.nodes().len) |i| {
+            const node: Ast.Node.Index = @enumFromInt(i);
+            const literal = DeclLiteral.at(semantic, &file.owner_map, node) orelse continue;
+            const owner = file.owner_map.get(node) orelse continue;
+            const ty = resolveTypeNode(project, file.id, literal.type_node) orelse continue;
+            const target = hop(project, ty, literal.name) orelse continue;
+            try graph.addEdge(gpa, .{ .file = file.id, .local = owner }, target, node, .possible);
+        }
+    }
+}
+
+/// Resolves a type-position expression node (`node`, in `file_id`'s AST)
+/// to the symbol it names, across `@import` boundaries: the same
+/// pointer/slice/array/`?`/`!` unwrapping `InstanceType.resolveTypeExpr`
+/// does same-file, then `resolveValueChain` on what's left.
+fn resolveTypeNode(project: *const Project, file_id: FileId, node: Ast.Node.Index) ?SymbolId {
+    const ast = &project.file(file_id).semantic.parse.ast;
+    var cur = node;
+    while (true) {
+        if (ast.fullPtrType(cur)) |ptr| {
+            cur = ptr.ast.child_type;
+        } else if (ast.fullArrayType(cur)) |array| {
+            cur = array.ast.elem_type;
+        } else switch (ast.nodeTag(cur)) {
+            .optional_type => cur = ast.nodeData(cur).node,
+            .error_union => cur = ast.nodeData(cur).node_and_node[1],
+            else => break,
+        }
+    }
+    return resolveValueChain(project, file_id, cur);
+}
+
+/// If `alias` is a plain value alias (see `FieldChain.valueAliasInit`),
+/// the symbol its initializer names, resolved across `@import` boundaries.
+/// `const Project = zigroot.Project;` resolves to the `Project` export of
+/// whatever file `zigroot` imports; `const FileId =
+/// @import("FileId.zig").FileId;` to that file's `FileId`; a bare `const
+/// mod = @import("mod.zig");` to `mod.zig`'s file root.
+fn resolveAlias(project: *const Project, alias: SymbolId) ?SymbolId {
+    const semantic = &project.file(alias.file).semantic;
+    const init_node = FieldChain.valueAliasInit(semantic, alias.local, .{ .allow_call = true }) orelse return null;
+    return resolveValueChain(project, alias.file, init_node);
+}
+
+/// The `@import` edge whose call node is `node` in `file_id`, if `node` is
+/// a resolved file/module import.
+fn importEdgeAtNode(project: *const Project, file_id: FileId, node: Ast.Node.Index) ?ImportGraph.Edge {
+    for (project.import_graph.edgesFrom(file_id)) |edge| {
+        if (edge.node == node) return edge;
+    }
+    return null;
 }
 
 /// Phase 22: `SymbolGraph.build` walks every same-file reference through
@@ -160,13 +262,13 @@ fn buildStuckFieldChains(gpa: Allocator, graph: *SymbolGraph, project: *const Pr
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
 
                 const chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
-                if (chain.stuck != null or chain.stuck_call != null) {
+                if (chain.stuck != null or chain.stuck_call != null or chain.stuck_alias != null) {
                     try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
                 }
 
                 if (instance_ty) |ty| {
                     const inst_chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, ty, ref.node, .possible);
-                    if (inst_chain.stuck != null or inst_chain.stuck_call != null) {
+                    if (inst_chain.stuck != null or inst_chain.stuck_call != null or inst_chain.stuck_alias != null) {
                         try addChain(project, graph, gpa, owner_id, file.id, semantic, semantic, &file.owner_map, ty, ref.node, .possible);
                     }
                 }
@@ -205,6 +307,12 @@ fn aliasRoot(from_semantic: *const Semantic, import_node: Semantic.Ast.Node.Inde
 /// resolves, every reference to the variable used as a field access
 /// (`s.run()`) chains into the target file via `FieldChain.resolveChain`,
 /// same as the same-file case in `SymbolGraph`.
+///
+/// Phase 30: any declared type `InstanceType.resolve` couldn't finish
+/// same-file goes through `declaredType`, which also follows aliases and
+/// multi-hop `@import` chains (`x: *const Project`, `Project` being an
+/// `@import` binding, so the type *is* the target file), not only the
+/// one-hop `storage.Widget` shape.
 fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
     for (project.files.items) |file| {
         const semantic = &file.semantic;
@@ -212,19 +320,15 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
         var sym_it = semantic.symbols.iter();
         while (sym_it.next()) |sym_id| {
             if (InstanceType.resolve(semantic, &file.owner_map, sym_id) != null) continue;
-            const root = InstanceType.crossFileRoot(semantic, &file.owner_map, sym_id) orelse continue;
-
-            const target = importTargetRoot(project, file.id, root.base) orelse continue;
-            const target_file_id = target.file;
-            const target_file = project.file(target_file_id);
+            const ty = declaredType(project, .{ .file = file.id, .local = sym_id }) orelse continue;
+            const target_file = project.file(ty.file);
             const target_semantic = &target_file.semantic;
-            const ty = FieldChain.findExport(target_semantic, &target_file.owner_map, target.root, root.field) orelse continue;
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
                 const owner = file.owner_map.get(ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
-                try addChain(project, graph, gpa, owner_id, target_file_id, semantic, target_semantic, &target_file.owner_map, ty, ref.node, .possible);
+                try addChain(project, graph, gpa, owner_id, ty.file, semantic, target_semantic, &target_file.owner_map, ty.local, ref.node, .possible);
             }
         }
     }
@@ -332,12 +436,34 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
         return resolveValueChain(project, file_id, type_arg);
     }
     const fn_expr = InstanceType.callInit(semantic, sym_id) orelse {
-        const seq_sym = InstanceType.forElementSequenceSymbol(semantic, sym_id) orelse return null;
-        return callInstanceType(project, file_id, seq_sym);
+        if (InstanceType.forElementSequenceSymbol(semantic, sym_id)) |seq_sym| {
+            return callInstanceType(project, file_id, seq_sym);
+        }
+        return initChainType(project, file_id, sym_id);
     };
 
-    const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return null;
-    return resolveFnReturnType(project, fn_sym);
+    const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return initChainType(project, file_id, sym_id);
+    return resolveFnReturnType(project, fn_sym) orelse initChainType(project, file_id, sym_id);
+}
+
+/// Phase 30: `const semantic = &project.file(file_id).semantic;` — a
+/// variable with no annotation, initialized from a value chain that mixes
+/// calls, `.field` hops and wrappers across `@import` boundaries. The
+/// chain lands on some declaration (`File.semantic`, a field); the
+/// variable's type is that declaration's own declared type (or, for a call
+/// at the end, the callee's return type, which `resolveValueChain` already
+/// yields). `null` if the initializer isn't such a chain or any hop fails.
+fn initChainType(project: *const Project, file_id: FileId, sym_id: Semantic.Symbol.Id) ?SymbolId {
+    const semantic = &project.file(file_id).semantic;
+    // A call-free chain is a plain alias: `resolveAlias` (via
+    // `FieldChain`'s `stuck_alias`) already handles those.
+    if (FieldChain.valueAliasInit(semantic, sym_id, .{}) != null) return null;
+    const init_node = FieldChain.valueAliasInit(semantic, sym_id, .{ .allow_call = true }) orelse return null;
+    const landed = resolveValueChain(project, file_id, init_node) orelse return null;
+    if (declaredType(project, landed)) |ty| return ty;
+    const landed_symbol = project.file(landed.file).semantic.symbols.get(landed.local);
+    if (landed_symbol.flags.s_fn or landed_symbol.flags.s_member or landed_symbol.flags.s_fn_param) return null;
+    return landed;
 }
 
 /// `fn_sym`'s declared return type, resolved across as many `@import`
@@ -348,7 +474,15 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
 fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
     const fn_semantic = &project.file(fn_sym.file).semantic;
     const fn_symbol = fn_semantic.symbols.get(fn_sym.local);
-    if (!fn_symbol.flags.s_fn) return null;
+    if (!fn_symbol.flags.s_fn) {
+        // Calling something that isn't a function: a generic container
+        // reached through an alias (`const Mixin = util.Bitflags;
+        // Mixin(Flags)`) — unwrap the alias and retry once.
+        const aliased = resolveAlias(project, fn_sym) orelse return null;
+        if (aliased.eql(fn_sym)) return null;
+        if (!project.file(aliased.file).semantic.symbols.get(aliased.local).flags.s_fn) return null;
+        return resolveFnReturnType(project, aliased);
+    }
 
     const fn_ast = &fn_semantic.parse.ast;
     var proto_buf: [1]Ast.Node.Index = undefined;
@@ -369,7 +503,7 @@ fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
         const container = FieldChain.containerOf(fn_semantic, fn_owner_map, fn_sym.local) orelse return null;
         return .{ .file = fn_sym.file, .local = container };
     }
-    return resolveValueChain(project, fn_sym.file, return_node);
+    return resolveTypeNode(project, fn_sym.file, return_node);
 }
 
 /// Whether `node` is the bare `type` keyword — the return-type spelling of a
@@ -400,6 +534,24 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
             const base = resolveValueChain(project, file_id, data[0]) orelse break :blk null;
             break :blk hop(project, base, semantic.tokenSlice(data[1]));
         },
+        // A bare `@import("x.zig")` in value position names the target
+        // file's root — the whole file as a container.
+        .builtin_call_two, .builtin_call_two_comma => blk: {
+            if (!std.mem.eql(u8, semantic.tokenSlice(ast.nodeMainToken(node)), "@import")) break :blk null;
+            const edge = importEdgeAtNode(project, file_id, node) orelse break :blk null;
+            break :blk .{ .file = edge.to, .local = FILE_ROOT_SYMBOL };
+        },
+        // Wrappers that don't change what the value names.
+        .address_of, .@"try", .deref => resolveValueChain(project, file_id, ast.nodeData(node).node),
+        .grouped_expression, .unwrap_optional => resolveValueChain(project, file_id, ast.nodeData(node).node_and_token[0]),
+        // A call names an instance of the callee's declared return type
+        // (or, for a `type`-returning generic, the container it returns).
+        .call, .call_comma, .call_one, .call_one_comma => blk: {
+            var buf: [1]Ast.Node.Index = undefined;
+            const call = ast.fullCall(&buf, node) orelse break :blk null;
+            const callee = resolveValueChain(project, file_id, call.ast.fn_expr) orelse break :blk null;
+            break :blk resolveFnReturnType(project, callee);
+        },
         else => null,
     };
 }
@@ -416,7 +568,19 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
 /// across the `@import` boundary it's declared with, same as
 /// `FieldChain.resolveChain`'s in-chain redirection does for a stuck hop —
 /// see `addChain`), and the hop is retried against it.
+///
+/// Phase 30: a `base` that's a plain value alias (`const Project =
+/// zigroot.Project;`) is unwrapped through `resolveAlias` and the hop
+/// retried on what it names. Alias chains are bounded (`max_hop_depth`) so
+/// a cyclic `const a = b; const b = a;` can't recurse forever.
 fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
+    return hopDepth(project, base, field, 0);
+}
+
+const max_hop_depth = 16;
+
+fn hopDepth(project: *const Project, base: SymbolId, field: []const u8, depth: usize) ?SymbolId {
+    if (depth > max_hop_depth) return null;
     const base_file = project.file(base.file);
     if (FieldChain.findExport(&base_file.semantic, &base_file.owner_map, base.local, field)) |found| {
         return .{ .file = base.file, .local = found };
@@ -429,8 +593,12 @@ fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
         }
     }
 
+    if (resolveAlias(project, base)) |aliased| {
+        if (!aliased.eql(base)) return hopDepth(project, aliased, field, depth + 1);
+    }
+
     const ty = declaredType(project, base) orelse return null;
-    return hop(project, ty, field);
+    return hopDepth(project, ty, field, depth + 1);
 }
 
 /// `base`'s own declared type, resolved same-file via `InstanceType.resolve`
@@ -439,6 +607,12 @@ fn hop(project: *const Project, base: SymbolId, field: []const u8) ?SymbolId {
 /// `importTargetRoot` + `FieldChain.findExport` already do for a binding's
 /// own field hops above. `null` if `base` has no syntactically-resolvable
 /// declared type.
+///
+/// Phase 30: failing both, every declared-type node `InstanceType` knows
+/// how to find (`declaredTypeNodes`) is resolved through `resolveTypeNode`
+/// instead — which follows aliases and any number of `@import` hops, so
+/// `owner: []Symbol.Id.Optional` (with `Symbol` itself an alias of an
+/// import's export) resolves where the one-hop `crossFileRoot` can't.
 fn declaredType(project: *const Project, base: SymbolId) ?SymbolId {
     const base_file = project.file(base.file);
     const semantic = &base_file.semantic;
@@ -448,11 +622,19 @@ fn declaredType(project: *const Project, base: SymbolId) ?SymbolId {
         return .{ .file = base.file, .local = ty };
     }
 
-    const root = InstanceType.crossFileRoot(semantic, owner_map, base.local) orelse return null;
-    const target = importTargetRoot(project, base.file, root.base) orelse return null;
-    const target_file = project.file(target.file);
-    const ty = FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, root.field) orelse return null;
-    return .{ .file = target.file, .local = ty };
+    if (InstanceType.crossFileRoot(semantic, owner_map, base.local)) |root| {
+        if (importTargetRoot(project, base.file, root.base)) |target| {
+            const target_file = project.file(target.file);
+            if (FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, root.field)) |ty| {
+                return .{ .file = target.file, .local = ty };
+            }
+        }
+    }
+
+    for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
+        if (resolveTypeNode(project, base.file, type_node)) |ty| return ty;
+    }
+    return null;
 }
 
 /// Continues resolving `start` (declared in `symbols`, first referenced at
@@ -486,24 +668,54 @@ fn addChain(
     var cur_owner_map = owner_map;
     var chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, start, start_node, start_kind);
 
+    var alias_hops: usize = 0;
     while (true) {
-        if (chain.stuck) |stuck| {
-            const root = InstanceType.crossFileRoot(cur_symbols, cur_owner_map, stuck.symbol) orelse break;
-            const target = importTargetRoot(project, cur_file, root.base) orelse break;
-            const next_file = project.file(target.file);
-            const next_semantic = &next_file.semantic;
-            const ty = FieldChain.findExport(next_semantic, &next_file.owner_map, target.root, root.field) orelse break;
+        // Every symbol a segment passed through is as used as its end.
+        for (chain.visitedSlice()) |through| {
+            try graph.addEdge(gpa, owner_id, .{ .file = cur_file, .local = through }, start_node, .possible);
+        }
 
-            cur_file = target.file;
-            cur_symbols = next_semantic;
+        if (chain.stuck_alias) |stuck| {
+            // Phase 30: resume from whatever the alias names, which may be
+            // another alias (a re-export chain), so this loops; bounded
+            // for the same reason `hop` is.
+            alias_hops += 1;
+            if (alias_hops > max_hop_depth) break;
+            const aliased = resolveAlias(project, .{ .file = cur_file, .local = stuck.symbol }) orelse break;
+            if (aliased.file == cur_file and aliased.local == stuck.symbol) break;
+            const next_file = project.file(aliased.file);
+
+            // The alias target is passed through too (and, for an
+            // `@import` binding, it's the target file's root — reaching it
+            // reaches the file's top-level fields).
+            try graph.addEdge(gpa, owner_id, aliased, start_node, .possible);
+
+            cur_file = aliased.file;
+            cur_symbols = &next_file.semantic;
             cur_owner_map = &next_file.owner_map;
-            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty, stuck.node, stuck.kind);
+            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, aliased.local, stuck.node, stuck.kind);
+            continue;
+        }
+
+        if (chain.stuck) |stuck| {
+            const ty = declaredType(project, .{ .file = cur_file, .local = stuck.symbol }) orelse break;
+            const next_file = project.file(ty.file);
+
+            try graph.addEdge(gpa, owner_id, ty, start_node, .possible);
+
+            cur_file = ty.file;
+            cur_symbols = &next_file.semantic;
+            cur_owner_map = &next_file.owner_map;
+            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty.local, stuck.node, stuck.kind);
             continue;
         }
 
         if (chain.stuck_call) |stuck_call| {
             const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse break;
             const ty_file = project.file(ty.file);
+
+            try graph.addEdge(gpa, owner_id, .{ .file = cur_file, .local = stuck_call.fn_symbol }, start_node, .possible);
+            try graph.addEdge(gpa, owner_id, ty, start_node, .possible);
 
             cur_file = ty.file;
             cur_symbols = &ty_file.semantic;

@@ -118,7 +118,7 @@ pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Se
 }
 
 /// Up to two declared-type node candidates, most-specific first.
-const TypeNodeCandidates = struct {
+pub const TypeNodeCandidates = struct {
     nodes: [2]Ast.Node.Index = undefined,
     len: u8 = 0,
 
@@ -127,7 +127,7 @@ const TypeNodeCandidates = struct {
         self.len += 1;
     }
 
-    fn slice(self: *const TypeNodeCandidates) []const Ast.Node.Index {
+    pub fn slice(self: *const TypeNodeCandidates) []const Ast.Node.Index {
         return self.nodes[0..self.len];
     }
 };
@@ -138,7 +138,7 @@ const TypeNodeCandidates = struct {
 /// struct/union), then an explicit variable type annotation, then an
 /// explicitly-typed struct-literal initializer. Empty if `sym_id` is none of
 /// these, or has none of these.
-fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) TypeNodeCandidates {
+pub fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) TypeNodeCandidates {
     var out: TypeNodeCandidates = .{};
     const symbol = semantic.symbols.get(sym_id);
 
