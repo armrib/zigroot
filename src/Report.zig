@@ -124,10 +124,15 @@ pub fn deinit(findings: *std.ArrayListUnmanaged(Finding), gpa: Allocator) void {
     findings.deinit(gpa);
 }
 
-/// Prints `finding` as `path:line:column: kind name`, plus ` (+N nested)`
-/// and, for a cycle, ` (cycle of N: a, b, ...)`.
-pub fn print(project: *const Project, finding: Finding) void {
-    std.debug.print("  {s}:{d}:{d}: {s} {s}", .{ finding.path, finding.line, finding.column, finding.kind, finding.name });
+/// Prints `finding` as `line:column: kind name`, without the path — for
+/// grouping consecutive findings under one file header via `printGrouped`.
+pub fn printLine(project: *const Project, finding: Finding) void {
+    std.debug.print("    {d}:{d}: {s} {s}", .{ finding.line, finding.column, finding.kind, finding.name });
+    printSuffix(project, finding);
+    std.debug.print("\n", .{});
+}
+
+fn printSuffix(project: *const Project, finding: Finding) void {
     if (finding.nested > 0) std.debug.print(" (+{d} nested)", .{finding.nested});
     if (finding.cycle.len > 0) {
         std.debug.print(" (cycle of {d}:", .{finding.cycle.len});
@@ -140,5 +145,21 @@ pub fn print(project: *const Project, finding: Finding) void {
         }
         std.debug.print(")", .{});
     }
-    std.debug.print("\n", .{});
+}
+
+/// Prints `findings` grouped under one `  path` header per distinct file,
+/// each followed by its `line:column: kind name` entries. `findings` must
+/// already be sorted by path (as `collect` returns them); entries where
+/// `possible` doesn't match `want_possible` are skipped (dead vs.
+/// possibly-dead are reported in separate sections).
+pub fn printGrouped(project: *const Project, findings: []const Finding, want_possible: bool) void {
+    var current_path: ?[]const u8 = null;
+    for (findings) |f| {
+        if (f.possible != want_possible) continue;
+        if (current_path == null or !std.mem.eql(u8, current_path.?, f.path)) {
+            std.debug.print("\n  {s}\n", .{f.path});
+            current_path = f.path;
+        }
+        printLine(project, f);
+    }
 }
