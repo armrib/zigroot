@@ -66,6 +66,15 @@ has_executable: bool = false,
 /// instead of executable mode.
 has_library: bool = false,
 
+/// Every `addImport("name", ...)` / `.imports = &.{ .{ .name = "name", ...
+/// } }` name whose module value is *not* one of this project's
+/// `createModule`/`b.path` bindings — a `b.dependency(...).module(...)`,
+/// or anything else the scan can't trace to a local file. Such a name is
+/// an external package as far as the project is concerned: an
+/// `@import("name")` of it is neither dead code nor a configuration gap.
+/// Owned.
+external_names: std.StringHashMapUnmanaged(void) = .empty,
+
 pub const empty: BuildGraph = .{};
 
 /// Resolves a cross-file helper call site's callee (`<local-file-alias>.
@@ -125,7 +134,27 @@ pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     self.test_roots.deinit(gpa);
     for (self.exe_roots.items) |path| gpa.free(path);
     self.exe_roots.deinit(gpa);
+    var ext_it = self.external_names.keyIterator();
+    while (ext_it.next()) |k| gpa.free(k.*);
+    self.external_names.deinit(gpa);
     self.* = undefined;
+}
+
+/// Whether `name` was bound by an `addImport` whose module the scan could
+/// not trace to a local file — see `external_names`.
+pub fn isExternal(self: *const BuildGraph, name: []const u8) bool {
+    return self.external_names.contains(name);
+}
+
+/// Records `import_name` (owned; freed here if already present) as an
+/// external module name.
+fn addExternalName(gpa: Allocator, result: *BuildGraph, import_name: []u8) !void {
+    const gop = try result.external_names.getOrPut(gpa, import_name);
+    if (gop.found_existing) {
+        gpa.free(import_name);
+    } else {
+        gop.key_ptr.* = import_name;
+    }
 }
 
 /// Returns every candidate root source file path `name` resolves to, or
@@ -289,6 +318,12 @@ pub fn parseInto(
         }
 
         if (std.mem.eql(u8, field, "addModule")) {
+            // `b.addModule("name", ...)` exports a source module for other
+            // packages to `@import` — the package-manager convention for a
+            // library with no compiled artifact of its own. Its `pub`
+            // surface is real API, so it counts as a library for the
+            // executable-vs-library policy inference.
+            result.has_library = true;
             if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
                 const import_name = parseStringLiteral(gpa, &tree, found.name) catch continue;
                 errdefer gpa.free(import_name);
@@ -336,7 +371,7 @@ pub fn parseInto(
 
         const value_node = call.ast.params[1];
         const rel_path = pathForBinding(&tree, &bindings, &field_bindings, value_node) orelse {
-            gpa.free(import_name);
+            try addExternalName(gpa, result, import_name);
             continue;
         };
 
@@ -898,7 +933,7 @@ fn scanImportsField(
 
         const name = import_name orelse continue;
         const path = module_path orelse {
-            gpa.free(name);
+            try addExternalName(gpa, result, name);
             continue;
         };
         try addModulePath(gpa, result, name, path);

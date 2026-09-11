@@ -26,6 +26,11 @@ owner_map: OwnerMap,
 /// Same-file `Symbol -> Symbol` reference edges, built from `semantic`
 /// and `owner_map`. See `SymbolGraph`.
 symbol_graph: SymbolGraph,
+/// Parse and semantic-analysis diagnostics the builder reported for this
+/// file. A file with any of these has a partial symbol table (the parser
+/// recovers as best it can), so its dead-symbol findings can't be trusted;
+/// the CLI prints them and exits non-zero. Owned.
+errors: std.ArrayListUnmanaged(Semantic.Error),
 
 /// Reads `path` from disk, parses it, and runs ZLint's semantic builder
 /// over it. `path` must already be resolved (see `Project.resolvePath`);
@@ -39,7 +44,7 @@ pub fn load(gpa: Allocator, id: FileId, path: []const u8) !File {
 
     var result = try builder.build(source);
     errdefer result.value.deinit();
-    result.errors.deinit(gpa);
+    errdefer result.deinitErrors();
 
     var owner_map = try OwnerMap.build(gpa, &result.value);
     errdefer owner_map.deinit(gpa);
@@ -54,10 +59,13 @@ pub fn load(gpa: Allocator, id: FileId, path: []const u8) !File {
         .semantic = result.value,
         .owner_map = owner_map,
         .symbol_graph = symbol_graph,
+        .errors = result.errors,
     };
 }
 
 pub fn deinit(self: *File, gpa: Allocator) void {
+    for (self.errors.items) |*err| err.deinit(gpa);
+    self.errors.deinit(gpa);
     self.symbol_graph.deinit(gpa);
     self.owner_map.deinit(gpa);
     self.semantic.deinit();

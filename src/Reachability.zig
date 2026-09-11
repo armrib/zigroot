@@ -64,7 +64,9 @@ pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots, cross
         try queue.append(gpa, root.symbol);
     }
 
-    while (queue.pop()) |current| {
+    var cursor: usize = 0;
+    while (cursor < queue.items.len) : (cursor += 1) {
+        const current = queue.items[cursor];
         const graph = &project.file(current.file).symbol_graph;
         for (graph.outgoing(current)) |target| {
             if (target.kind == .unknown) continue;
@@ -115,6 +117,17 @@ fn collectUnknown(self: *Reachability, gpa: Allocator, graph: *const SymbolGraph
 /// such a chain is returned, with `nested` counting how many descendants
 /// were folded into it.
 ///
+/// Only *declarations* are reported (`isReportable`): a `fn`/`const`/`var`
+/// declared directly in a container, i.e. something a user deletes as a
+/// unit. Parameters, locals, loop/catch captures and container fields are
+/// never findings of their own — an unused parameter of a live function
+/// is the compiler's business (`unused function parameter`), and deleting
+/// a field changes a type's layout for every user. They still count as
+/// `nested` descendants of a dead declaration, and `build` still walks
+/// them: a local that references a function creates the edge
+/// `enclosing_fn -> function` through `OwnerMap`, so the filter only
+/// affects reporting, never reachability.
+///
 /// Caller owns the returned list.
 pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Project) Allocator.Error!std.ArrayListUnmanaged(Dead) {
     var all: std.ArrayListUnmanaged(SymbolId) = .empty;
@@ -153,6 +166,7 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
 
     for (all.items) |id| {
         if (!outermostDead(project, &dead_ids, id).eql(id)) continue;
+        if (!isReportable(project, id)) continue;
         try dead.append(gpa, .{
             .id = id,
             .possible = self.isPossiblyReachable(id),
@@ -161,6 +175,26 @@ pub fn deadSymbols(self: *const Reachability, gpa: Allocator, project: *const Pr
     }
 
     return dead;
+}
+
+/// Whether `id` is a declaration a user would delete as a unit — see
+/// `deadSymbols`. True for a named `fn`, `const` or `var` whose declaring
+/// scope is a container (the file's top level, or a `struct`/`enum`/
+/// `union` body) rather than a function body or block; false for
+/// parameters, control-flow payloads, `catch` captures, container fields
+/// and enum tags, and the `_` discard.
+pub fn isReportable(project: *const Project, id: SymbolId) bool {
+    const f = project.file(id.file);
+    const sym = f.semantic.symbols.get(id.local);
+    if (sym.name.len == 0 or std.mem.eql(u8, sym.name, "_")) return false;
+    if (sym.flags.s_fn_param or sym.flags.s_payload or sym.flags.s_catch_param or sym.flags.s_member) return false;
+    if (!(sym.flags.s_fn or sym.flags.s_const or sym.flags.s_variable)) return false;
+    // A container body's scope carries `s_block` alongside `s_struct`/...,
+    // so only `s_function` (the body of a fn) rules a scope out directly;
+    // a plain block inside a function has none of the container flags.
+    const scope = f.semantic.scopes.getScope(sym.scope).flags;
+    if (scope.s_function or scope.s_test) return false;
+    return scope.s_top or scope.s_struct or scope.s_enum or scope.s_union;
 }
 
 /// Whether `decl` (a `s_fn_param` symbol's declaration node — its type

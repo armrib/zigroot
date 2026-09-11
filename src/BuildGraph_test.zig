@@ -615,3 +615,27 @@ test "parseInto resolves a module/path forwarded through an Options struct into 
     try t.expectEqual(@as(usize, 1), paths.len);
     try t.expectEqualStrings("src/dep.zig", paths[0]);
 }
+
+test "b.addModule counts as a library, and a b.dependency-backed addImport name is external" {
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer file_imports.deinit(t.allocator);
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const dep = b.dependency("thing", .{});
+        \\    const mod = b.addModule("mylib", .{ .root_source_file = b.path("src/root.zig") });
+        \\    mod.addImport("thing", dep.module("thing"));
+        \\}
+        \\
+    , &file_imports, null);
+
+    try t.expect(graph.has_library);
+    try t.expect(!graph.has_executable);
+    try t.expect(graph.isExternal("thing"));
+    try t.expect(!graph.isExternal("mylib"));
+    try t.expectEqualStrings("src/root.zig", graph.resolve("mylib").?[0]);
+}

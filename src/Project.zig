@@ -17,6 +17,7 @@ const File = @import("File.zig");
 const ImportGraph = @import("ImportGraph.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const BuildGraph = @import("BuildGraph.zig");
+const ZonFile = @import("ZonFile.zig");
 
 const Project = @This();
 
@@ -32,6 +33,20 @@ import_graph: ImportGraph = .empty,
 /// without it.
 build_graph: ?BuildGraph = null,
 build_graph_dir: []const u8 = "",
+/// The `build.zig.zon` next to the loaded `build.zig`, if there was one:
+/// its dependency names are external modules, and its path dependencies
+/// are excluded from `discoverZigFiles`. Empty until `loadBuildGraph`.
+zon: ZonFile = .empty,
+/// Canonical paths of the `build.zig` and every file it pulls in (local
+/// `@import`s and cross-file helpers) while `loadBuildGraph` scans it.
+/// Build scripts are the build's own roots, never `@import`ed by project
+/// code, so `isReachable` treats them as reached rather than orphans.
+/// Owned.
+build_files: std.StringHashMapUnmanaged(void) = .empty,
+/// Canonical directories `discoverZigFiles` skips on top of the built-in
+/// list: every `.path` dependency of `zon`, resolved against
+/// `build_graph_dir`. Owned.
+excluded_dirs: std.ArrayListUnmanaged([]const u8) = .empty,
 
 pub fn init(gpa: Allocator) Project {
     return .{ .gpa = gpa };
@@ -45,7 +60,40 @@ pub fn deinit(self: *Project) void {
     self.import_graph.deinit(self.gpa);
     if (self.build_graph) |*bg| bg.deinit(self.gpa);
     if (self.build_graph_dir.len > 0) self.gpa.free(self.build_graph_dir);
+    self.zon.deinit(self.gpa);
+    var bf_it = self.build_files.keyIterator();
+    while (bf_it.next()) |k| self.gpa.free(k.*);
+    self.build_files.deinit(self.gpa);
+    for (self.excluded_dirs.items) |d| self.gpa.free(d);
+    self.excluded_dirs.deinit(self.gpa);
     self.* = undefined;
+}
+
+/// Number of parse/semantic diagnostics across every loaded file. Any
+/// non-zero count means some file's symbol table is partial and its
+/// findings can't be trusted.
+pub fn errorCount(self: *const Project) usize {
+    var n: usize = 0;
+    for (self.files.items) |f| n += f.errors.items.len;
+    return n;
+}
+
+/// Whether `@import(name)` (a `.module` specifier) names something the
+/// project doesn't own: the compiler-provided `std`/`builtin`/`root`, a
+/// `build.zig.zon` dependency, or a name `build.zig` binds to a
+/// `b.dependency(...)` module. Such imports are reachability sinks — nothing
+/// in them can make a project declaration reachable — and never a
+/// configuration gap.
+pub fn isExternalModule(self: *const Project, name: []const u8) bool {
+    const builtin_modules = [_][]const u8{ "std", "builtin", "root" };
+    for (builtin_modules) |m| {
+        if (std.mem.eql(u8, m, name)) return true;
+    }
+    if (self.zon.isDependency(name)) return true;
+    if (self.build_graph) |bg| {
+        if (bg.isExternal(name)) return true;
+    }
+    return false;
 }
 
 /// Parses `build_zig_path` and records its local module graph, so
@@ -96,7 +144,14 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
 
     try self.scanBuildFile(&graph, &visited, &helper_cache, canonical);
 
+    var visited_it = visited.keyIterator();
+    while (visited_it.next()) |k| try self.noteBuildFile(k.*);
+    var helper_it = helper_cache.entries.keyIterator();
+    while (helper_it.next()) |k| try self.noteBuildFile(k.*);
+
     self.build_graph = graph;
+
+    try self.loadZon();
 
     // Each `b.addTest` target is its own root module, never `@import`ed
     // from anywhere — load it the same as an explicit `--root` so it (and
@@ -119,6 +174,39 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
         defer self.gpa.free(target_path);
         _ = self.addRoot(target_path) catch continue;
     }
+}
+
+fn noteBuildFile(self: *Project, canonical: []const u8) !void {
+    if (self.build_files.contains(canonical)) return;
+    const key = try self.gpa.dupe(u8, canonical);
+    errdefer self.gpa.free(key);
+    try self.build_files.put(self.gpa, key, {});
+}
+
+/// Reads the `build.zig.zon` beside the loaded `build.zig`, if any, into
+/// `zon`, and resolves its path dependencies into `excluded_dirs`. A
+/// missing or unreadable manifest is not an error: the project just has no
+/// declared dependencies.
+fn loadZon(self: *Project) !void {
+    const zon_path = try std.fs.path.join(self.gpa, &.{ self.build_graph_dir, "build.zig.zon" });
+    defer self.gpa.free(zon_path);
+
+    const source = File.readFileSentinel(self.gpa, zon_path) catch return;
+    defer self.gpa.free(source);
+
+    var zon = try ZonFile.parse(self.gpa, source);
+    errdefer zon.deinit(self.gpa);
+
+    for (zon.path_dependencies.items) |rel| {
+        const resolved = try std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel });
+        defer self.gpa.free(resolved);
+        const canonical = self.canonicalize(resolved) catch continue;
+        errdefer self.gpa.free(canonical);
+        try self.excluded_dirs.append(self.gpa, canonical);
+    }
+
+    self.zon.deinit(self.gpa);
+    self.zon = zon;
 }
 
 /// Scans one `build.zig` (or a file it locally `@import`s) into `graph`,
@@ -265,11 +353,11 @@ pub fn symbol(self: *const Project, id: SymbolId) *const Semantic.Symbol {
     return self.file(id.file).semantic.symbols.get(id.local);
 }
 
-/// True iff some configured root transitively imports `path`. Only
-/// meaningful for paths that were passed through `resolvePath` (or that
-/// came out of `discoverZigFiles`), since it compares canonical paths.
+/// True iff some configured root transitively imports `path`, or it's one
+/// of the build script files `loadBuildGraph` scanned. Only meaningful for
+/// canonical paths (e.g. from `discoverZigFiles`).
 pub fn isReachable(self: *const Project, canonical_path: []const u8) bool {
-    return self.by_path.contains(canonical_path);
+    return self.by_path.contains(canonical_path) or self.build_files.contains(canonical_path);
 }
 
 /// Adds `path` as a project root: loads it, parses it, and recursively
@@ -302,11 +390,12 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
         switch (entry.kind) {
             .module => {
                 if (try self.resolveViaBuildGraph(id, entry)) continue;
-                try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                const reason: ImportGraph.UnresolvedImport.Reason = if (self.isExternalModule(entry.specifier)) .external else .unknown_module;
+                try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node, reason);
             },
             .file => {
                 if (!std.mem.endsWith(u8, entry.specifier, ".zig")) {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node, .not_a_zig_file);
                     continue;
                 }
 
@@ -317,13 +406,13 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
                 if (try self.resolveViaBuildGraph(id, entry)) continue;
 
                 const target_path = std.fs.path.resolve(self.gpa, &.{ dir, entry.specifier }) catch {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node, .load_failed);
                     continue;
                 };
                 defer self.gpa.free(target_path);
 
                 const target_id = self.loadRecursive(target_path) catch {
-                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+                    try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node, .load_failed);
                     continue;
                 };
                 try self.import_graph.addEdge(self.gpa, id, target_id, entry.node);
@@ -358,19 +447,31 @@ fn resolveViaBuildGraph(self: *Project, id: FileId, entry: anytype) !bool {
         resolved_any = true;
     }
     if (!resolved_any) {
-        try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node);
+        try self.import_graph.addUnresolved(self.gpa, id, entry.specifier, entry.kind, entry.node, .load_failed);
     }
     return true;
+}
+
+/// Whether `canonical_path` lies under one of `excluded_dirs`.
+fn isExcluded(self: *const Project, canonical_path: []const u8) bool {
+    for (self.excluded_dirs.items) |dir| {
+        if (canonical_path.len > dir.len and
+            std.mem.startsWith(u8, canonical_path, dir) and
+            canonical_path[dir.len] == std.fs.path.sep) return true;
+    }
+    return false;
 }
 
 fn canonicalize(self: *Project, path: []const u8) ![]u8 {
     return std.fs.cwd().realpathAlloc(self.gpa, path);
 }
 
-/// Recursively finds every `*.zig` file under `dir` (skipping `.git`,
-/// `zig-cache`, `zig-out`, and `vendor`), for orphan-file detection: any
-/// discovered path that isn't a key of `by_path` after all roots have been
-/// loaded was never reached by `@import` from a configured root.
+/// Recursively finds every `*.zig` file under `dir` for orphan-file
+/// detection: any discovered path that isn't a key of `by_path` after all
+/// roots have been loaded was never reached by `@import` from a configured
+/// root. Skips any dot-directory (`.git`, `.zig-cache`, ...), `zig-cache`,
+/// `zig-out`, `vendor`, and every `build.zig.zon` path dependency
+/// (`excluded_dirs`) — all of those are somebody else's files.
 ///
 /// Caller owns the returned list and each path in it.
 pub fn discoverZigFiles(self: *Project, dir: []const u8) !std.ArrayListUnmanaged([]u8) {
@@ -386,11 +487,12 @@ pub fn discoverZigFiles(self: *Project, dir: []const u8) !std.ArrayListUnmanaged
     var walker = try root_dir.walk(self.gpa);
     defer walker.deinit();
 
-    const skip_dirs = [_][]const u8{ ".git", ".zig-cache", "zig-cache", "zig-out", "vendor" };
+    const skip_dirs = [_][]const u8{ "zig-cache", "zig-out", "vendor" };
 
     walk: while (try walker.next()) |entry| {
         var it = std.mem.tokenizeScalar(u8, entry.path, std.fs.path.sep);
         while (it.next()) |component| {
+            if (component.len > 1 and component[0] == '.') continue :walk;
             for (skip_dirs) |skip| {
                 if (std.mem.eql(u8, component, skip)) continue :walk;
             }
@@ -402,6 +504,11 @@ pub fn discoverZigFiles(self: *Project, dir: []const u8) !std.ArrayListUnmanaged
         const full = try std.fs.path.join(self.gpa, &.{ dir, entry.path });
         defer self.gpa.free(full);
         const canonical = try self.canonicalize(full);
+        errdefer self.gpa.free(canonical);
+        if (self.isExcluded(canonical)) {
+            self.gpa.free(canonical);
+            continue;
+        }
         try out.append(self.gpa, canonical);
     }
 

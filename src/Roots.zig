@@ -94,11 +94,15 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
     var roots: Roots = .empty;
     errdefer roots.deinit(gpa);
 
+    // The compiler looks these up as *top-level* declarations of the root
+    // source file, so only a binding in the file's root scope counts — a
+    // parameter or local that happens to be named `main` earlier in the
+    // file is not the entry point.
     const compiler_recognized_names = [_][]const u8{ "main", "std_options", "panic" };
     for (project.roots.items) |file_id| {
         const semantic = &project.file(file_id).semantic;
         for (compiler_recognized_names) |name| {
-            if (semantic.symbols.getSymbolNamed(name)) |local| {
+            if (semantic.getBinding(Semantic.ROOT_SCOPE_ID, name)) |local| {
                 try roots.add(gpa, .{ .file = file_id, .local = local }, .executable_entry);
             }
         }
