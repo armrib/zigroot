@@ -108,102 +108,25 @@ test "an export declaration is a root even with no references" {
     try t.expectEqual(Roots.RootKind.@"export", roots.roots.items[0].kind);
 }
 
-test "a symbol referenced only from a test block is a test root" {
+test "a test block seeds no roots: test-only code is dead" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     try writeFile(tmp.dir, "main.zig",
+        \\const Widget = struct {
+        \\    pub fn init() Widget { return .{}; }
+        \\    pub fn run(self: Widget) void { _ = self; }
+        \\};
         \\fn only_used_in_test() void {}
         \\pub fn main() void {}
         \\
         \\test "covers only_used_in_test" {
         \\    only_used_in_test();
+        \\    var w: Widget = .init();
+        \\    w.run();
         \\}
         \\
     );
-    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
-    defer t.allocator.free(root_path);
-
-    var project: Project = .init(t.allocator);
-    defer project.deinit();
-
-    const file_id = try project.addRoot(root_path);
-
-    var roots = try Roots.build(t.allocator, &project, .analyze);
-    defer roots.deinit(t.allocator);
-
-    const target_id = project.file(file_id).semantic.symbols.getSymbolNamed("only_used_in_test").?;
-
-    var found = false;
-    for (roots.roots.items) |root| {
-        if (root.symbol.eql(.{ .file = file_id, .local = target_id })) {
-            try t.expectEqual(Roots.RootKind.@"test", root.kind);
-            found = true;
-        }
-    }
-    try t.expect(found);
-}
-
-test "an instance-method call on a locally-typed variable in a test block is a test root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try writeFile(tmp.dir, "main.zig",
-        \\const Foo = struct {
-        \\    pub fn run(self: *Foo) void { _ = self; }
-        \\};
-        \\pub fn main() void {}
-        \\
-        \\test "covers Foo.run" {
-        \\    var s: Foo = undefined;
-        \\    s.run();
-        \\}
-        \\
-    );
-    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
-    defer t.allocator.free(root_path);
-
-    var project: Project = .init(t.allocator);
-    defer project.deinit();
-
-    const file_id = try project.addRoot(root_path);
-
-    var roots = try Roots.build(t.allocator, &project, .analyze);
-    defer roots.deinit(t.allocator);
-
-    const run_id = project.file(file_id).semantic.symbols.getSymbolNamed("run").?;
-
-    var found = false;
-    for (roots.roots.items) |root| {
-        if (root.symbol.eql(.{ .file = file_id, .local = run_id })) {
-            try t.expectEqual(Roots.RootKind.@"test", root.kind);
-            found = true;
-        }
-    }
-    try t.expect(found);
-}
-
-test "an instance-method call on a cross-file-typed variable in a test block is a test root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try writeFile(tmp.dir, "main.zig",
-        \\const storage = @import("storage.zig");
-        \\pub fn main() void {}
-        \\
-        \\test "covers Widget.run" {
-        \\    var s: storage.Widget = undefined;
-        \\    s.run();
-        \\}
-        \\
-    );
-    try writeFile(tmp.dir, "storage.zig",
-        \\pub const Widget = struct {
-        \\    pub fn run(self: *Widget) void { _ = self; }
-        \\};
-        \\
-    );
-
     const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
     defer t.allocator.free(root_path);
 
@@ -215,113 +138,8 @@ test "an instance-method call on a cross-file-typed variable in a test block is 
     var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);
 
-    const storage_id = for (project.files.items) |f| {
-        if (std.mem.endsWith(u8, f.path, "storage.zig")) break f.id;
-    } else unreachable;
-    const run_id = project.file(storage_id).semantic.symbols.getSymbolNamed("run").?;
-
-    var found = false;
-    for (roots.roots.items) |root| {
-        if (root.symbol.eql(.{ .file = storage_id, .local = run_id })) {
-            try t.expectEqual(Roots.RootKind.@"test", root.kind);
-            found = true;
-        }
-    }
-    try t.expect(found);
-}
-
-test "a member call on an @import binding referenced only from a test block is a test root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try writeFile(tmp.dir, "main.zig",
-        \\const tester = @import("tester.zig");
-        \\pub fn main() void {}
-        \\
-        \\test "covers tester.init" {
-        \\    tester.init();
-        \\}
-        \\
-    );
-    try writeFile(tmp.dir, "tester.zig",
-        \\pub fn init() void {}
-        \\
-    );
-
-    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
-    defer t.allocator.free(root_path);
-
-    var project: Project = .init(t.allocator);
-    defer project.deinit();
-
-    _ = try project.addRoot(root_path);
-
-    var roots = try Roots.build(t.allocator, &project, .analyze);
-    defer roots.deinit(t.allocator);
-
-    const tester_id = for (project.files.items) |f| {
-        if (std.mem.endsWith(u8, f.path, "tester.zig")) break f.id;
-    } else unreachable;
-    const init_id = project.file(tester_id).semantic.symbols.getSymbolNamed("init").?;
-
-    var found = false;
-    for (roots.roots.items) |root| {
-        if (root.symbol.eql(.{ .file = tester_id, .local = init_id })) {
-            try t.expectEqual(Roots.RootKind.@"test", root.kind);
-            found = true;
-        }
-    }
-    try t.expect(found);
-}
-
-test "an instance-method call on a var initialized by a cross-file init() call in a test block is a test root" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try writeFile(tmp.dir, "main.zig",
-        \\const tester = @import("tester.zig");
-        \\pub fn main() void {}
-        \\
-        \\test "covers Tester.run" {
-        \\    var runner = tester.init();
-        \\    runner.run();
-        \\}
-        \\
-    );
-    try writeFile(tmp.dir, "tester.zig",
-        \\pub const Tester = struct {
-        \\    pub fn run(self: *Tester) void { _ = self; }
-        \\};
-        \\pub fn init() Tester {
-        \\    return .{};
-        \\}
-        \\
-    );
-
-    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
-    defer t.allocator.free(root_path);
-
-    var project: Project = .init(t.allocator);
-    defer project.deinit();
-
-    _ = try project.addRoot(root_path);
-
-    var roots = try Roots.build(t.allocator, &project, .analyze);
-    defer roots.deinit(t.allocator);
-
-    const tester_id = for (project.files.items) |f| {
-        if (std.mem.endsWith(u8, f.path, "tester.zig")) break f.id;
-    } else unreachable;
-    const run_id = project.file(tester_id).semantic.symbols.getSymbolNamed("run").?;
-
-    var found = false;
-    for (roots.roots.items) |root| {
-        if (root.symbol.eql(.{ .file = tester_id, .local = run_id })) {
-            try t.expectEqual(Roots.RootKind.@"test", root.kind);
-            found = true;
-        }
-    }
-    try t.expect(found);
+    try t.expectEqual(@as(usize, 1), roots.roots.items.len);
+    try t.expectEqualStrings("main", project.symbol(roots.roots.items[0].symbol).name);
 }
 
 test "pub symbols are only roots under PublicPolicy.root" {

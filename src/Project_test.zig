@@ -204,7 +204,7 @@ test "loadBuildGraph resolves a module returned by a cross-file helper call" {
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
 
-test "loadBuildGraph loads a b.addTest root_module as a project root, not an orphan" {
+test "a b.addTest root_module and what only it imports are test-only files, not orphans and not analyzed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -253,10 +253,73 @@ test "loadBuildGraph loads a b.addTest root_module as a project root, not an orp
     defer project.deinit();
 
     try project.loadBuildGraph(build_zig_path);
-    _ = try project.addRoot(root_path);
 
-    try t.expect(project.isReachable(test_path));
-    try t.expect(project.isReachable(admin_path));
+    try t.expectEqual(@as(usize, 1), project.files.items.len);
+    try t.expect(project.isReachable(root_path));
+    try t.expect(!project.isReachable(test_path));
+    try t.expect(!project.isReachable(admin_path));
+    try t.expect(project.isTestOnly(test_path));
+    try t.expect(project.isTestOnly(admin_path));
+}
+
+test "an @import inside a test block is not followed; its target is a test-only file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const storage = @import("storage.zig");
+        \\pub fn main() void {
+        \\    storage.start();
+        \\}
+        \\test {
+        \\    _ = @import("helper_test.zig");
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "storage.zig",
+        \\pub fn start() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "helper_test.zig",
+        \\const storage = @import("storage.zig");
+        \\const fixtures = @import("fixtures.zig");
+        \\test "start" {
+        \\    storage.start();
+        \\    fixtures.load();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "fixtures.zig",
+        \\pub fn load() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+    const storage_path = try tmp.dir.realpathAlloc(t.allocator, "storage.zig");
+    defer t.allocator.free(storage_path);
+    const helper_path = try tmp.dir.realpathAlloc(t.allocator, "helper_test.zig");
+    defer t.allocator.free(helper_path);
+    const fixtures_path = try tmp.dir.realpathAlloc(t.allocator, "fixtures.zig");
+    defer t.allocator.free(fixtures_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+    try project.resolveTestImports();
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expect(project.isReachable(storage_path));
+    try t.expect(!project.isReachable(helper_path));
+    try t.expect(project.isTestOnly(helper_path));
+    // Reached only through the test-only helper: test-only too, not an
+    // orphan.
+    try t.expect(!project.isReachable(fixtures_path));
+    try t.expect(project.isTestOnly(fixtures_path));
+    // Reached by main for real, so an ordinary analyzed file even though
+    // the helper imports it too.
+    try t.expect(!project.isTestOnly(storage_path));
 }
 
 test "loadBuildGraph loads a b.addExecutable root_module as a project root with no explicit --root" {

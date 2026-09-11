@@ -2,6 +2,14 @@
 //! analysis: file discovery, `@import("file.zig")` resolution, and
 //! (Phase 1) unreachable-file detection.
 //!
+//! Test code doesn't count as use. An `@import` written inside a `test {
+//! ... }` block is not followed into `files`: the target (and everything
+//! it in turn imports) is a *test-only file*, recorded in
+//! `test_only_files` but never analyzed, so a declaration only a test
+//! reaches is dead and a file only a test reaches is neither an orphan nor
+//! a source of findings. `b.addTest` root modules get the same treatment
+//! (`addTestRoot`): they're loaded only to classify their import closure.
+//!
 //! ZLint's `Semantic` deliberately only understands one file at a time
 //! ("program" in its docs means "a single parsed file", not a linked
 //! binary or library). `Project` is the layer above it that stitches
@@ -27,6 +35,14 @@ files: std.ArrayListUnmanaged(File) = .empty,
 by_path: std.StringHashMapUnmanaged(FileId) = .empty,
 roots: std.ArrayListUnmanaged(FileId) = .empty,
 import_graph: ImportGraph = .empty,
+/// Canonical paths of every `.zig` file reachable only through a test
+/// (`@import` inside a `test` block, or a `b.addTest` root module) and
+/// nothing else — see the module doc. Never loaded into `files`. Owned.
+test_only_files: std.StringHashMapUnmanaged(void) = .empty,
+/// `@import`s found inside `test` blocks of analyzed files, deferred
+/// until every analysis root is loaded (an analysis root loaded later may
+/// still reach the same file for real). Resolved absolute paths. Owned.
+pending_test_imports: std.ArrayListUnmanaged([]const u8) = .empty,
 /// Named-module imports (`@import("some_mod")`) that `build_graph`
 /// resolves to a local file, keyed by the `build.zig`'s directory. `null`
 /// until `loadBuildGraph` is called; named-module imports stay unresolved
@@ -58,6 +74,11 @@ pub fn deinit(self: *Project) void {
     self.by_path.deinit(self.gpa);
     self.roots.deinit(self.gpa);
     self.import_graph.deinit(self.gpa);
+    var to_it = self.test_only_files.keyIterator();
+    while (to_it.next()) |k| self.gpa.free(k.*);
+    self.test_only_files.deinit(self.gpa);
+    for (self.pending_test_imports.items) |p| self.gpa.free(p);
+    self.pending_test_imports.deinit(self.gpa);
     if (self.build_graph) |*bg| bg.deinit(self.gpa);
     if (self.build_graph_dir.len > 0) self.gpa.free(self.build_graph_dir);
     self.zon.deinit(self.gpa);
@@ -153,27 +174,30 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
 
     try self.loadZon();
 
-    // Each `b.addTest` target is its own root module, never `@import`ed
-    // from anywhere — load it the same as an explicit `--root` so it (and
-    // whatever it imports) stops being reported as an orphan and its
-    // `test { ... }` blocks seed `.test` roots. Best-effort: a path that
-    // fails to resolve or load is silently skipped, same as any other
-    // best-effort result of this syntactic scan.
-    for (graph.test_roots.items) |rel_path| {
-        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
-        defer self.gpa.free(target_path);
-        _ = self.addRoot(target_path) catch continue;
-    }
-
-    // Same treatment for `addExecutable`/`addLibrary` root modules: load
-    // each as if it were a `--root` so a build.zig-driven run reaches an
-    // executable's `main` (or a library's exports) without one having to
-    // be passed explicitly.
+    // Every `addExecutable`/`addLibrary`/`addModule` root module is an
+    // analysis root: load each as if it were passed explicitly so the run
+    // reaches an executable's `main` (or a library's exports). Best-effort:
+    // a path that fails to resolve or load is silently skipped, same as any
+    // other best-effort result of this syntactic scan.
     for (graph.exe_roots.items) |rel_path| {
         const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
         defer self.gpa.free(target_path);
         _ = self.addRoot(target_path) catch continue;
     }
+
+    // Each `b.addTest` target is its own root module, never `@import`ed
+    // from anywhere, and test code doesn't count as use — so it seeds no
+    // roots and isn't analyzed. It's loaded only so it (and whatever it
+    // imports that nothing else does) is classified test-only instead of
+    // orphaned. Must come after the analysis roots: a file both reach is
+    // an ordinary analyzed file.
+    for (graph.test_roots.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        self.addTestRoot(target_path) catch continue;
+    }
+
+    try self.resolveTestImports();
 }
 
 fn noteBuildFile(self: *Project, canonical: []const u8) !void {
@@ -355,17 +379,128 @@ pub fn symbol(self: *const Project, id: SymbolId) *const Semantic.Symbol {
 
 /// True iff some configured root transitively imports `path`, or it's one
 /// of the build script files `loadBuildGraph` scanned. Only meaningful for
-/// canonical paths (e.g. from `discoverZigFiles`).
+/// canonical paths (e.g. from `discoverZigFiles`). A test-only file is
+/// *not* reachable in this sense; see `isTestOnly`.
 pub fn isReachable(self: *const Project, canonical_path: []const u8) bool {
     return self.by_path.contains(canonical_path) or self.build_files.contains(canonical_path);
 }
 
+/// True iff `canonical_path` is reached only through test code (see the
+/// module doc) — never analyzed, but not an orphan either.
+pub fn isTestOnly(self: *const Project, canonical_path: []const u8) bool {
+    return self.test_only_files.contains(canonical_path);
+}
+
 /// Adds `path` as a project root: loads it, parses it, and recursively
 /// follows its `@import("*.zig")` chain. Returns the root's `FileId`.
+///
+/// `@import`s inside `test` blocks are deferred, not followed — call
+/// `resolveTestImports` once every root is added to classify their
+/// targets as test-only files.
 pub fn addRoot(self: *Project, path: []const u8) !FileId {
     const id = try self.loadRecursive(path);
     try self.roots.append(self.gpa, id);
     return id;
+}
+
+/// Records `path` (a `b.addTest` root module) as a test-only file unless
+/// an analysis root already reaches it, then classifies its whole import
+/// closure the same way. Loads nothing into `files`.
+pub fn addTestRoot(self: *Project, path: []const u8) !void {
+    const canonical = try self.canonicalize(path);
+    defer self.gpa.free(canonical);
+    try self.markTestOnlyClosure(canonical);
+}
+
+/// Classifies the target of every `test`-block `@import` deferred by
+/// `addRoot`, and its import closure, as test-only. Idempotent; call once
+/// every analysis root has been added.
+pub fn resolveTestImports(self: *Project) !void {
+    while (self.pending_test_imports.items.len > 0) {
+        const path = self.pending_test_imports.pop().?;
+        defer self.gpa.free(path);
+        const canonical = self.canonicalize(path) catch continue;
+        defer self.gpa.free(canonical);
+        try self.markTestOnlyClosure(canonical);
+    }
+}
+
+/// Marks `canonical` and everything it transitively `@import`s as
+/// test-only, stopping at files an analysis root reaches (`by_path`) and
+/// at files already marked. Each test-only file is parsed just far enough
+/// to read its imports and then dropped.
+fn markTestOnlyClosure(self: *Project, canonical: []const u8) !void {
+    var stack: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (stack.items) |p| self.gpa.free(p);
+        stack.deinit(self.gpa);
+    }
+    try stack.append(self.gpa, try self.gpa.dupe(u8, canonical));
+
+    while (stack.items.len > 0) {
+        const current = stack.pop().?;
+        defer self.gpa.free(current);
+
+        if (self.by_path.contains(current) or self.test_only_files.contains(current)) continue;
+
+        var imports: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (imports.items) |p| self.gpa.free(p);
+            imports.deinit(self.gpa);
+        }
+        self.scanImports(current, &imports) catch continue;
+
+        const key = try self.gpa.dupe(u8, current);
+        errdefer self.gpa.free(key);
+        try self.test_only_files.put(self.gpa, key, {});
+
+        for (imports.items) |target| {
+            const target_canonical = self.canonicalize(target) catch continue;
+            errdefer self.gpa.free(target_canonical);
+            try stack.append(self.gpa, target_canonical);
+        }
+    }
+}
+
+/// Appends to `out` the resolved (not yet canonical) path of every `.zig`
+/// file `canonical` imports — relative-file imports and build-graph named
+/// modules alike, from `test` blocks or not — without keeping the parsed
+/// file around.
+fn scanImports(self: *Project, canonical: []const u8, out: *std.ArrayListUnmanaged([]u8)) !void {
+    const source = try File.readFileSentinel(self.gpa, canonical);
+    defer self.gpa.free(source);
+
+    var builder = Semantic.Builder.init(self.gpa);
+    defer builder.deinit();
+    var result = try builder.build(source);
+    defer result.deinit();
+
+    const dir = std.fs.path.dirname(canonical) orelse ".";
+    for (result.value.modules.imports.items) |entry| {
+        if (self.build_graph) |bg| {
+            if (bg.resolve(entry.specifier)) |rel_paths| {
+                for (rel_paths) |rel_path| {
+                    const target = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+                    try out.append(self.gpa, target);
+                }
+                continue;
+            }
+        }
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.specifier, ".zig")) continue;
+        const target = std.fs.path.resolve(self.gpa, &.{ dir, entry.specifier }) catch continue;
+        try out.append(self.gpa, target);
+    }
+}
+
+/// Whether `node` (an `@import(...)` call) sits inside a `test { ... }`
+/// block of `semantic`'s file.
+fn isInTestBlock(semantic: *const Semantic, node: Semantic.Ast.Node.Index) bool {
+    const ast = &semantic.parse.ast;
+    var cur = semantic.node_links.getParent(node);
+    while (cur) |c| : (cur = semantic.node_links.getParent(c)) {
+        if (ast.nodeTag(c) == .test_decl) return true;
+    }
+    return false;
 }
 
 /// Loads `path` (if not already loaded), records its file-import edges,
@@ -387,6 +522,27 @@ fn loadRecursive(self: *Project, path: []const u8) anyerror!FileId {
     const dir = std.fs.path.dirname(canonical) orelse ".";
     const imports = self.files.items[id.index()].semantic.modules.imports.items;
     for (imports) |entry| {
+        // Test code doesn't count as use: an `@import` inside a `test`
+        // block is deferred to `resolveTestImports`, which classifies the
+        // target test-only unless some analysis root reaches it for real.
+        if (isInTestBlock(&self.files.items[id.index()].semantic, entry.node)) {
+            const test_target: ?[]u8 = blk: {
+                if (self.build_graph) |bg| {
+                    if (bg.resolve(entry.specifier)) |rel_paths| {
+                        for (rel_paths) |rel_path| {
+                            const target = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+                            try self.pending_test_imports.append(self.gpa, target);
+                        }
+                        break :blk null;
+                    }
+                }
+                if (entry.kind != .file or !std.mem.endsWith(u8, entry.specifier, ".zig")) break :blk null;
+                break :blk std.fs.path.resolve(self.gpa, &.{ dir, entry.specifier }) catch null;
+            };
+            if (test_target) |target| try self.pending_test_imports.append(self.gpa, target);
+            continue;
+        }
+
         switch (entry.kind) {
             .module => {
                 if (try self.resolveViaBuildGraph(id, entry)) continue;
