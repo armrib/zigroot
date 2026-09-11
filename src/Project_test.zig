@@ -153,6 +153,57 @@ test "loadBuildGraph resolves a named-module @import to its file" {
     try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
 }
 
+test "loadBuildGraph resolves a module returned by a cross-file helper call" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\const helper = @import("build/helper.zig");
+        \\pub fn build(b: *std.Build) void {
+        \\    const foo = helper.fooModule(b);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("foo", foo);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "build/helper.zig",
+        \\const std = @import("std");
+        \\pub fn fooModule(b: *std.Build) *std.Build.Module {
+        \\    return b.createModule(.{ .root_source_file = b.path("src/foo.zig") });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const foo = @import("foo");
+        \\pub fn main() void {
+        \\    foo.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/foo.zig",
+        \\pub fn run() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    try t.expectEqual(@as(usize, 2), project.files.items.len);
+    try t.expectEqual(@as(usize, 0), project.import_graph.unresolved.items.len);
+}
+
 test "loadBuildGraph loads a b.addTest root_module as a project root, not an orphan" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

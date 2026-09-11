@@ -84,7 +84,17 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
         visited.deinit(self.gpa);
     }
 
-    try self.scanBuildFile(&graph, &visited, canonical);
+    // Shared across the whole recursive scan (not per-file): a cross-file
+    // helper call (`vendor.yamlModule(...)`) may need a file that hasn't
+    // been scanned as part of the local-@import chain `visited`/`graph`
+    // tracks yet — e.g. a helper file only ever referenced this way, never
+    // itself `@import`ed by another file already in the chain. Loaded
+    // lazily and cached here so the same helper file isn't re-parsed for
+    // every call site that names it.
+    var helper_cache: HelperFileCache = .empty;
+    defer helper_cache.deinit(self.gpa);
+
+    try self.scanBuildFile(&graph, &visited, &helper_cache, canonical);
 
     self.build_graph = graph;
 
@@ -109,6 +119,7 @@ fn scanBuildFile(
     self: *Project,
     graph: *BuildGraph,
     visited: *std.StringHashMapUnmanaged(void),
+    helper_cache: *HelperFileCache,
     canonical: []const u8,
 ) anyerror!void {
     if (visited.contains(canonical)) return;
@@ -123,18 +134,91 @@ fn scanBuildFile(
         file_imports.deinit(self.gpa);
     }
 
-    try BuildGraph.parseInto(self.gpa, graph, source, &file_imports);
-
     const dir = std.fs.path.dirname(canonical) orelse ".";
+    var resolve_ctx: HelperResolveCtx = .{ .project = self, .cache = helper_cache, .dir = dir };
+    const resolver: BuildGraph.HelperResolver = .{ .context = &resolve_ctx, .resolveFn = HelperResolveCtx.resolve };
+
+    try BuildGraph.parseInto(self.gpa, graph, source, &file_imports, resolver);
+
     for (file_imports.items) |rel_path| {
         const target_path = std.fs.path.resolve(self.gpa, &.{ dir, rel_path }) catch continue;
         defer self.gpa.free(target_path);
         const target_canonical = self.canonicalize(target_path) catch continue;
         defer self.gpa.free(target_canonical);
 
-        try self.scanBuildFile(graph, visited, target_canonical);
+        try self.scanBuildFile(graph, visited, helper_cache, target_canonical);
     }
 }
+
+/// Caches parsed `Ast`s (keyed by canonical path) of files loaded on demand
+/// to resolve a cross-file helper call — see `HelperResolveCtx`. Kept
+/// separate from `Project.files`/`File` (which owns a ZLint `Semantic`,
+/// overkill for what's just a syntactic AST lookup) and from `visited`
+/// (which only tracks the local-`@import` chain `build.zig` itself walks,
+/// not files reached solely through a cross-file helper call).
+const HelperFileCache = struct {
+    const Entry = struct { source: [:0]u8, tree: std.zig.Ast };
+
+    entries: std.StringHashMapUnmanaged(Entry) = .empty,
+
+    const empty: HelperFileCache = .{};
+
+    fn deinit(self: *HelperFileCache, gpa: Allocator) void {
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.tree.deinit(gpa);
+            gpa.free(entry.value_ptr.source);
+            gpa.free(entry.key_ptr.*);
+        }
+        self.entries.deinit(gpa);
+    }
+
+    /// Returns the cached (or freshly parsed and cached) `Ast` for
+    /// `canonical_path`, or `null` if it can't be read or fails to parse —
+    /// best-effort, matching every other lookup this feeds into.
+    fn getOrLoad(self: *HelperFileCache, gpa: Allocator, canonical_path: []const u8) !?*const std.zig.Ast {
+        if (self.entries.getPtr(canonical_path)) |entry| return &entry.tree;
+
+        const source = File.readFileSentinel(gpa, canonical_path) catch return null;
+        errdefer gpa.free(source);
+        var tree = std.zig.Ast.parse(gpa, source, .zig) catch return null;
+        errdefer tree.deinit(gpa);
+
+        const key = try gpa.dupe(u8, canonical_path);
+        errdefer gpa.free(key);
+        const gop = try self.entries.getOrPut(gpa, key);
+        gop.key_ptr.* = key;
+        gop.value_ptr.* = .{ .source = source, .tree = tree };
+        return &gop.value_ptr.tree;
+    }
+};
+
+/// Implements `BuildGraph.HelperResolver` for a `build.zig`-family file
+/// currently being scanned: resolves a `<alias>.<fn>(...)` call's callee to
+/// whichever file `alias`'s local `@import` specifier points to (relative
+/// to `dir`, this file's own directory), loads it via `cache`, and looks up
+/// `fn_name`'s `root_source_file` return value there.
+const HelperResolveCtx = struct {
+    project: *Project,
+    cache: *HelperFileCache,
+    dir: []const u8,
+
+    fn resolve(context: *anyopaque, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
+        const self: *HelperResolveCtx = @ptrCast(@alignCast(context));
+
+        const target_path = std.fs.path.resolve(gpa, &.{ self.dir, rel_import_path }) catch return null;
+        defer gpa.free(target_path);
+        const target_canonical = self.project.canonicalize(target_path) catch return null;
+        defer gpa.free(target_canonical);
+
+        const tree = (try self.cache.getOrLoad(gpa, target_canonical)) orelse return null;
+
+        var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+        var struct_buf: [2]std.zig.Ast.Node.Index = undefined;
+        const tok = BuildGraph.rootSourceFileOfHelperFn(tree, fn_name, &call_buf, &struct_buf) orelse return null;
+        return BuildGraph.parseStringLiteral(gpa, tree, tok) catch null;
+    }
+};
 
 pub fn file(self: *const Project, id: FileId) *const File {
     return &self.files.items[id.index()];

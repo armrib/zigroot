@@ -304,10 +304,70 @@ test "parseInto collects local-file @import specifiers, not package/module names
         \\    _ = b;
         \\}
         \\
-    , &file_imports);
+    , &file_imports, null);
 
     try t.expectEqual(@as(usize, 1), file_imports.items.len);
     try t.expectEqualStrings("build/helper.zig", file_imports.items[0]);
+}
+
+test "rootSourceFileOfHelperFn resolves a helper fn whose body returns b.createModule(...)" {
+    const source: [:0]const u8 =
+        \\const std = @import("std");
+        \\pub fn fooModule(b: *std.Build) *std.Build.Module {
+        \\    return b.createModule(.{ .root_source_file = b.path("src/foo.zig") });
+        \\}
+        \\
+    ;
+    var tree = try std.zig.Ast.parse(t.allocator, source, .zig);
+    defer tree.deinit(t.allocator);
+
+    var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+    var struct_buf: [2]std.zig.Ast.Node.Index = undefined;
+    const tok = BuildGraph.rootSourceFileOfHelperFn(&tree, "fooModule", &call_buf, &struct_buf).?;
+
+    const path = try BuildGraph.parseStringLiteral(t.allocator, &tree, tok);
+    defer t.allocator.free(path);
+    try t.expectEqualStrings("src/foo.zig", path);
+}
+
+test "parseInto resolves a call to a cross-file-import-aliased helper via the given resolver" {
+    const StubResolver = struct {
+        fn resolve(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
+            _ = context;
+            try t.expectEqualStrings("build/vendor.zig", rel_import_path);
+            try t.expectEqualStrings("yamlModule", fn_name);
+            return try gpa.dupe(u8, "libs/yaml/yaml.zig");
+        }
+    };
+    var dummy_ctx: u8 = 0;
+    const resolver: BuildGraph.HelperResolver = .{ .context = &dummy_ctx, .resolveFn = StubResolver.resolve };
+
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| t.allocator.free(p);
+        file_imports.deinit(t.allocator);
+    }
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\const vendor = @import("build/vendor.zig");
+        \\pub fn build(b: *std.Build) void {
+        \\    const yaml_mod = vendor.yamlModule(b);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("yaml", yaml_mod);
+        \\}
+        \\
+    , &file_imports, resolver);
+
+    const paths = graph.resolve("yaml").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("libs/yaml/yaml.zig", paths[0]);
 }
 
 test "records a b.addTest root_module bound to a local createModule variable as a test root" {

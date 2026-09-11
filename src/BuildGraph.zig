@@ -45,6 +45,25 @@ test_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 
 pub const empty: BuildGraph = .{};
 
+/// Resolves a cross-file helper call site's callee (`<local-file-alias>.
+/// <fn>(...)`) to the `root_source_file` path its body returns —
+/// implemented by `Project`, which owns the file loading/caching and
+/// canonical-path resolution `parseInto` itself has no access to.
+/// `rel_import_path` is the local-file `@import` specifier the callee's
+/// namespace alias was bound from (e.g. `"build/vendor.zig"`), resolved by
+/// the implementer relative to the *calling* file's directory; `fn_name` is
+/// the callee. Returns `null` (not an error) for a helper that can't be
+/// found or whose body doesn't match the recognized shape — same
+/// best-effort semantics as every other lookup in this file.
+pub const HelperResolver = struct {
+    context: *anyopaque,
+    resolveFn: *const fn (context: *anyopaque, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) anyerror!?[]u8,
+
+    fn resolve(self: HelperResolver, gpa: Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
+        return self.resolveFn(self.context, gpa, rel_import_path, fn_name);
+    }
+};
+
 pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     var it = self.modules.iterator();
     while (it.next()) |entry| {
@@ -81,7 +100,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
         file_imports.deinit(gpa);
     }
 
-    try parseInto(gpa, &result, source, &file_imports);
+    try parseInto(gpa, &result, source, &file_imports, null);
     return result;
 }
 
@@ -97,12 +116,16 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !BuildGraph {
 /// caller against the original build root regardless of which file it
 /// was found in, matching how `b.path` actually behaves at runtime.
 /// `source` need not be error-free; a file with parse errors just
-/// contributes nothing.
+/// contributes nothing. `resolver`, if given, is consulted for a call-site
+/// shape neither `rootSourceFileOfCreateModule` nor `bindStructReturnFields`
+/// covers: `<local-file-alias>.<fn>(...)`, a helper declared in a
+/// different, locally-`@import`ed file (see `HelperResolver`).
 pub fn parseInto(
     gpa: Allocator,
     result: *BuildGraph,
     source: [:0]const u8,
     file_imports: *std.ArrayListUnmanaged([]u8),
+    resolver: ?HelperResolver,
 ) !void {
     var tree = try Ast.parse(gpa, source, .zig);
     defer tree.deinit(gpa);
@@ -110,6 +133,13 @@ pub fn parseInto(
     // local variable name -> root_source_file path (borrowed from `tree`).
     var bindings: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer bindings.deinit(gpa);
+
+    // local variable name -> string-literal token of the relative path a
+    // `const <name> = @import("relative/file.zig");` binds, so a later
+    // `<name>.<fn>(...)` call site can be resolved cross-file via
+    // `resolver`. Borrowed from `tree`.
+    var import_aliases: std.StringHashMapUnmanaged(Ast.TokenIndex) = .empty;
+    defer import_aliases.deinit(gpa);
 
     // "<var>.<field>" -> root_source_file path, for `mods.foo` where `mods`
     // is bound to the result of a local helper that returns `.{ .foo = foo,
@@ -152,6 +182,12 @@ pub fn parseInto(
                     continue;
                 }
 
+                if (try resolveCrossFileHelper(gpa, &tree, resolver, &import_aliases, call)) |path| {
+                    errdefer gpa.free(path);
+                    try putBinding(gpa, &bindings, var_name, path);
+                    continue;
+                }
+
                 try bindStructReturnFields(gpa, &tree, &bindings, &field_bindings, var_name, call, &struct_buf);
             }
 
@@ -159,6 +195,7 @@ pub fn parseInto(
                 const path = parseStringLiteral(gpa, &tree, path_tok) catch continue;
                 errdefer gpa.free(path);
                 try file_imports.append(gpa, path);
+                try import_aliases.put(gpa, var_name, path_tok);
             }
             continue;
         }
@@ -446,6 +483,71 @@ fn passThroughPathParamIndex(tree: *const Ast, proto: Ast.full.FnProto, body: As
     return null;
 }
 
+/// If `call.ast.fn_expr` is `<alias>.<fn_name>` (a field access on a bare
+/// identifier, e.g. `vendor.yamlModule`), returns `alias` and `fn_name` so
+/// the caller can check whether `alias` is a known local-file `@import`
+/// alias and, if so, try `resolver` against it. `null` for anything else
+/// (a builtin/namespace call like `b.createModule(...)`, a nested field
+/// chain, a bare-identifier callee — those are handled elsewhere).
+fn crossFileHelperCall(tree: *const Ast, call: Ast.full.Call) ?struct { alias: []const u8, fn_name: []const u8 } {
+    if (tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
+    const data = tree.nodeData(call.ast.fn_expr).node_and_token;
+    if (tree.nodeTag(data[0]) != .identifier) return null;
+    return .{
+        .alias = tree.tokenSlice(tree.nodeMainToken(data[0])),
+        .fn_name = tree.tokenSlice(data[1]),
+    };
+}
+
+/// If `call` is `<alias>.<fn>(...)` where `alias` is a known local-file
+/// `@import` alias (recorded in `import_aliases`) and `resolver` is given,
+/// asks `resolver` to resolve `fn` (as defined in whichever file `alias`'s
+/// import specifier points to) to a `root_source_file` path — see
+/// `HelperResolver`. Returns `null` (not an error) whenever the shape
+/// doesn't match or the resolver can't find anything, matching every other
+/// lookup in this file.
+fn resolveCrossFileHelper(
+    gpa: Allocator,
+    tree: *const Ast,
+    resolver: ?HelperResolver,
+    import_aliases: *const std.StringHashMapUnmanaged(Ast.TokenIndex),
+    call: Ast.full.Call,
+) !?[]u8 {
+    const r = resolver orelse return null;
+    const helper_call = crossFileHelperCall(tree, call) orelse return null;
+    const alias_tok = import_aliases.get(helper_call.alias) orelse return null;
+    const rel_path = parseStringLiteral(gpa, tree, alias_tok) catch return null;
+    defer gpa.free(rel_path);
+    return r.resolve(gpa, rel_path, helper_call.fn_name) catch null;
+}
+
+/// If `tree` contains a `fn <fn_name>(...) ... { ... }` declaration whose
+/// body's last statement is `return <recv>.createModule(...);` (any
+/// statements before it don't matter, e.g. a leading validation call — same
+/// relaxation `passThroughPathParamIndex` allows for the path-only case) —
+/// a helper that builds and returns a module directly, rather than just a
+/// path — returns the token index of the inner `root_source_file`
+/// string literal, exactly as `rootSourceFileOfCreateModule` would for an
+/// inline `b.createModule(...)` call.
+pub fn rootSourceFileOfHelperFn(
+    tree: *const Ast,
+    fn_name: []const u8,
+    call_buf: *[1]Ast.Node.Index,
+    struct_buf: *[2]Ast.Node.Index,
+) ?Ast.TokenIndex {
+    const fn_decl = findFnDecl(tree, fn_name) orelse return null;
+    const body = tree.nodeData(fn_decl).node_and_node[1];
+
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, body) orelse return null;
+    if (stmts.len == 0) return null;
+    const last = stmts[stmts.len - 1];
+    if (tree.nodeTag(last) != .@"return") return null;
+    const ret_expr = tree.nodeData(last).opt_node.unwrap() orelse return null;
+
+    return rootSourceFileOfCreateModule(tree, ret_expr, call_buf, struct_buf);
+}
+
 /// Finds a `fn <name>(...) ... { ... }` declaration anywhere in `tree`.
 fn findFnDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
     var i: u32 = 0;
@@ -647,7 +749,7 @@ fn putBinding(gpa: Allocator, bindings: *std.StringHashMapUnmanaged([]const u8),
     gop.value_ptr.* = path;
 }
 
-fn parseStringLiteral(gpa: Allocator, tree: *const Ast, token: Ast.TokenIndex) ![]u8 {
+pub fn parseStringLiteral(gpa: Allocator, tree: *const Ast, token: Ast.TokenIndex) ![]u8 {
     const raw = tree.tokenSlice(token);
     return std.zig.string_literal.parseAlloc(gpa, raw) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
