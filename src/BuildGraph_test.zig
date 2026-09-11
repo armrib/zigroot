@@ -191,6 +191,50 @@ test "resolves a module whose root_source_file goes through a b.path pass-throug
     try t.expectEqualStrings("src/helper.zig", paths[0]);
 }
 
+test "resolves a module whose root_source_file is a direct .cwd_relative LazyPath literal" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const foo = b.createModule(.{
+        \\        .root_source_file = .{ .cwd_relative = "../shared/foo.zig" },
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("foo", foo);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("foo").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("../shared/foo.zig", paths[0]);
+}
+
+test "resolves a module whose root_source_file is .{ .cwd_relative = b.pathFromRoot(...) }" {
+    var graph = try BuildGraph.parse(t.allocator,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const foo = b.createModule(.{
+        \\        .root_source_file = .{ .cwd_relative = b.pathFromRoot("../shared/foo.zig") },
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("foo", foo);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("foo").?;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("../shared/foo.zig", paths[0]);
+}
+
 test "an addImport of an unrelated identifier is ignored, not crashing" {
     var graph = try BuildGraph.parse(t.allocator,
         \\const std = @import("std");

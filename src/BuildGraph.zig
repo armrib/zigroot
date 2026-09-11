@@ -302,14 +302,16 @@ fn nameAndRootSourceFileOfAddModule(
 }
 
 /// Finds the `.root_source_file = b.path("...")` field (or a pass-through
-/// helper call in its place, see `pathThroughHelperCall`) in `options` — a
-/// `.{ ... }` struct-literal node — and returns the token index of the
-/// string literal it resolves to.
+/// helper call in its place, see `pathThroughHelperCall`; or a
+/// `.{ .cwd_relative = ... }` `LazyPath` literal, see `cwdRelativePathToken`)
+/// in `options` — a `.{ ... }` struct-literal node — and returns the token
+/// index of the string literal it resolves to.
 fn rootSourceFileFromOptions(tree: *const Ast, options: Ast.Node.Index, struct_buf: *[2]Ast.Node.Index) ?Ast.TokenIndex {
     const struct_init = tree.fullStructInit(struct_buf, options) orelse return null;
     for (struct_init.ast.fields) |field_value| {
         const name_tok = tree.firstToken(field_value) - 2;
         if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_source_file")) continue;
+        if (cwdRelativePathToken(tree, field_value)) |tok| return tok;
         var inner_buf: [1]Ast.Node.Index = undefined;
         const path_call = tree.fullCall(&inner_buf, field_value) orelse return null;
         if (fieldAccessName(tree, path_call.ast.fn_expr)) |path_field| {
@@ -320,6 +322,35 @@ fn rootSourceFileFromOptions(tree: *const Ast, options: Ast.Node.Index, struct_b
             return tree.nodeMainToken(arg);
         }
         return pathThroughHelperCall(tree, path_call);
+    }
+    return null;
+}
+
+/// If `node` is a `std.Build.LazyPath` struct literal `.{ .cwd_relative =
+/// "..." }` (direct absolute/cwd-relative string) or `.{ .cwd_relative =
+/// b.pathFromRoot("...") }` (a path built from something rooted a directory
+/// or two above `b`'s own root), returns the token index of the inner
+/// string literal — `pathFromRoot`'s argument is relative to the build root
+/// exactly like `b.path`'s argument is relative to `build.zig`'s directory,
+/// so it's resolved by the caller the same way. Uses its own local buffer
+/// rather than a caller-supplied one since it's called while iterating an
+/// outer struct-literal's fields, which may still be borrowing that buffer.
+fn cwdRelativePathToken(tree: *const Ast, node: Ast.Node.Index) ?Ast.TokenIndex {
+    var inner_struct_buf: [2]Ast.Node.Index = undefined;
+    const inner_struct = tree.fullStructInit(&inner_struct_buf, node) orelse return null;
+    for (inner_struct.ast.fields) |inner_field| {
+        const name_tok = tree.firstToken(inner_field) - 2;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "cwd_relative")) continue;
+        if (tree.nodeTag(inner_field) == .string_literal) return tree.nodeMainToken(inner_field);
+
+        var call_buf: [1]Ast.Node.Index = undefined;
+        const call = tree.fullCall(&call_buf, inner_field) orelse return null;
+        const field = fieldAccessName(tree, call.ast.fn_expr) orelse return null;
+        if (!std.mem.eql(u8, field, "pathFromRoot")) return null;
+        if (call.ast.params.len < 1) return null;
+        const arg = call.ast.params[0];
+        if (tree.nodeTag(arg) != .string_literal) return null;
+        return tree.nodeMainToken(arg);
     }
     return null;
 }
