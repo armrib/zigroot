@@ -169,9 +169,7 @@ pub fn main() !u8 {
 
     if (dead_count > 0) {
         std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead_count});
-        for (findings.items) |f| {
-            if (!f.possible) Report.print(&project, f);
-        }
+        Report.printGrouped(&project, findings.items, false);
         had_findings = true;
     } else {
         std.debug.print("\nno dead declarations found\n", .{});
@@ -179,9 +177,7 @@ pub fn main() !u8 {
 
     if (possible_count > 0) {
         std.debug.print("\n{d} possibly dead declaration(s) (only reached through a runtime-named @field(...)):\n", .{possible_count});
-        for (findings.items) |f| {
-            if (f.possible) Report.print(&project, f);
-        }
+        Report.printGrouped(&project, findings.items, true);
     }
 
     if (error_count > 0) return 2;
