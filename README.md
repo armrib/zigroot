@@ -181,6 +181,15 @@ Status: Phase 0-16. Implemented so far:
   library mode treats the whole project's. Its non-`pub` declarations are
   still checked: nothing outside the file can reach those whatever else
   builds it.
+- Test-support declarations (Phase 37): a `tmpRoot` or `StubAgent` helper
+  sitting at the bottom of a production file is the same thing as a whole
+  test-only *file* — which `Project.isTestOnly` already declines to call an
+  orphan — just without a file of its own to be recognized by. Reachability
+  now runs a second time with `test { ... }` blocks added as roots, and what
+  that reaches but the production walk did not is reported as **test-only**:
+  its own section, not a failure. `pub` declarations, orphan files and
+  production code nothing but a test reaches are unaffected; only the
+  reported class changes, and only for symbols a test actually reaches.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

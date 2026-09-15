@@ -20,7 +20,11 @@
 //!   even though — like a `test` block — the block has no symbol of its
 //!   own for `OwnerMap` to attribute the reference to.
 //!
-//! Test code deliberately seeds nothing. A `test { ... }` block has no
+//! - `.test_block`: every symbol referenced from a container-level `test
+//!   { ... }` block, collected separately by `buildTestBlockRoots` and
+//!   never by `build` — see Phase 37 there.
+//!
+//! Test code deliberately seeds nothing in `build`. A `test { ... }` block has no
 //! symbol identity of its own (see `Builder.zig`'s `test_decl` handling),
 //! so `OwnerMap` finds no owner for references inside it and `SymbolGraph`
 //! records no edges from it — and that's the intended semantics: a
@@ -32,12 +36,13 @@ const Allocator = std.mem.Allocator;
 const Semantic = @import("semantic/Semantic.zig");
 
 const Project = @import("Project.zig");
+const File = @import("File.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const FieldChain = @import("FieldChain.zig");
 
 const Roots = @This();
 
-pub const RootKind = enum { executable_entry, @"export", public_api, comptime_block };
+pub const RootKind = enum { executable_entry, @"export", public_api, comptime_block, test_block };
 
 /// Whether `pub` alone makes a symbol a root.
 ///
@@ -106,19 +111,65 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             while (ref_it.next()) |ref| {
                 if (f.owner_map.get(ref.node) != null) continue;
                 if (isInTestScope(semantic, ref.scope)) continue;
-                try roots.add(gpa, .{ .file = f.id, .local = local }, .comptime_block);
-                const chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, local, ref.node, .definite);
-                for (chain.visitedSlice()) |through| {
-                    try roots.add(gpa, .{ .file = f.id, .local = through }, .comptime_block);
-                }
-                if (chain.result.symbol != local) {
-                    try roots.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, .comptime_block);
-                }
+                try roots.addBlockReference(gpa, &f, local, ref.node, .comptime_block);
             }
         }
     }
 
     return roots;
+}
+
+/// Phase 37: the mirror image of `build`'s `.comptime_block` seeding — every
+/// symbol a container-level `test { ... }` block references, and everything
+/// its chain passes through. On its own this is not a reachability root set:
+/// `main` takes reachability over `build`'s roots *plus* these, and the
+/// difference between the two runs is exactly the set only test code reaches.
+///
+/// That set wants reporting, not deleting. A `tmpRoot` helper at the bottom
+/// of a production file is the same thing as a whole test-only file — which
+/// `Project.isTestOnly` already declines to call an orphan — just without a
+/// file of its own to be recognized by.
+pub fn buildTestBlockRoots(gpa: Allocator, project: *const Project) Allocator.Error!Roots {
+    var roots: Roots = .empty;
+    errdefer roots.deinit(gpa);
+
+    for (project.files.items) |f| {
+        const semantic = &f.semantic;
+        var it = semantic.symbols.iter();
+        while (it.next()) |local| {
+            var ref_it = semantic.symbols.iterReferences(local);
+            while (ref_it.next()) |ref| {
+                if (f.owner_map.get(ref.node) != null) continue;
+                if (!isInTestScope(semantic, ref.scope)) continue;
+                try roots.addBlockReference(gpa, &f, local, ref.node, .test_block);
+            }
+        }
+    }
+
+    return roots;
+}
+
+/// Seeds `local` — and every symbol the field chain starting at `ref_node`
+/// passes through or lands on — as a root of `kind`. Shared by the
+/// `comptime`- and `test`-block passes, which differ only in which scope
+/// they accept and what they call the result.
+fn addBlockReference(
+    self: *Roots,
+    gpa: Allocator,
+    f: *const File,
+    local: Semantic.Symbol.Id,
+    ref_node: Semantic.Ast.Node.Index,
+    kind: RootKind,
+) Allocator.Error!void {
+    try self.add(gpa, .{ .file = f.id, .local = local }, kind);
+    const semantic = &f.semantic;
+    const chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, local, ref_node, .definite);
+    for (chain.visitedSlice()) |through| {
+        try self.add(gpa, .{ .file = f.id, .local = through }, kind);
+    }
+    if (chain.result.symbol != local) {
+        try self.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, kind);
+    }
 }
 
 /// Phase 36: whether `path` sits outside the directory holding the

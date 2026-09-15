@@ -34,6 +34,7 @@ test {
     _ = @import("Roots_test.zig");
     _ = @import("Reachability_test.zig");
     _ = @import("Resolver_test.zig");
+    _ = @import("Report_test.zig");
     _ = @import("DynamicField_test.zig");
     _ = @import("InstanceType_test.zig");
     _ = @import("Scc_test.zig");

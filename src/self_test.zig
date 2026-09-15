@@ -79,16 +79,27 @@ test "self-run: analyzing this repository reports only the expected dead declara
     var scc = try Scc.build(t.allocator, &project, &cross_file);
     defer scc.deinit(t.allocator);
 
-    var findings = try Report.collect(t.allocator, &project, dead.items, &scc, project.build_graph_dir);
+    var test_roots = try Roots.buildTestBlockRoots(t.allocator, &project);
+    defer test_roots.deinit(t.allocator);
+    try test_roots.roots.appendSlice(t.allocator, roots.roots.items);
+    var test_reachable = try Reachability.build(t.allocator, &project, &test_roots, &cross_file);
+    defer test_reachable.deinit(t.allocator);
+
+    var findings = try Report.collect(t.allocator, &project, dead.items, &scc, project.build_graph_dir, &test_reachable);
     defer Report.deinit(&findings, t.allocator);
 
     var seen = [_]bool{false} ** expected_project_layer.len;
     var failed = false;
     for (findings.items) |f| {
-        if (f.possible) {
-            std.debug.print("unexpected possibly-dead finding: {s}:{d}:{d}: {s} {s}\n", .{ f.path, f.line, f.column, f.kind, f.name });
-            failed = true;
-            continue;
+        switch (f.class) {
+            .dead => {},
+            // Test support, not a finding to act on (Phase 37).
+            .test_only => continue,
+            .possible => {
+                std.debug.print("unexpected possibly-dead finding: {s}:{d}:{d}: {s} {s}\n", .{ f.path, f.line, f.column, f.kind, f.name });
+                failed = true;
+                continue;
+            },
         }
         if (std.mem.startsWith(u8, f.path, "src/semantic/")) continue;
 

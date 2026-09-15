@@ -158,26 +158,37 @@ pub fn main() !u8 {
     var scc = try zigroot.Scc.build(gpa, &project, &cross_file);
     defer scc.deinit(gpa);
 
-    var findings = try Report.collect(gpa, &project, dead.items, &scc, project.build_graph_dir);
+    // Phase 37: the same reachability walk with `test { ... }` blocks added
+    // as roots. Whatever this reaches that `reachability` did not is reached
+    // only from test code.
+    var test_roots = try zigroot.Roots.buildTestBlockRoots(gpa, &project);
+    defer test_roots.deinit(gpa);
+    try test_roots.roots.appendSlice(gpa, roots.roots.items);
+    var test_reachable = try zigroot.Reachability.build(gpa, &project, &test_roots, &cross_file);
+    defer test_reachable.deinit(gpa);
+
+    var findings = try Report.collect(gpa, &project, dead.items, &scc, project.build_graph_dir, &test_reachable);
     defer Report.deinit(&findings, gpa);
 
-    var dead_count: usize = 0;
-    var possible_count: usize = 0;
-    for (findings.items) |f| {
-        if (f.possible) possible_count += 1 else dead_count += 1;
-    }
+    var counts = std.EnumArray(Report.Class, usize).initFill(0);
+    for (findings.items) |f| counts.getPtr(f.class).* += 1;
 
-    if (dead_count > 0) {
-        std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{dead_count});
-        Report.printGrouped(&project, findings.items, false);
+    if (counts.get(.dead) > 0) {
+        std.debug.print("\n{d} dead declaration(s) (unreachable from any root):\n", .{counts.get(.dead)});
+        Report.printGrouped(&project, findings.items, .dead);
         had_findings = true;
     } else {
         std.debug.print("\nno dead declarations found\n", .{});
     }
 
-    if (possible_count > 0) {
-        std.debug.print("\n{d} possibly dead declaration(s) (only reached through a runtime-named @field(...)):\n", .{possible_count});
-        Report.printGrouped(&project, findings.items, true);
+    if (counts.get(.test_only) > 0) {
+        std.debug.print("\n{d} test-only declaration(s) (reached only from test code, not from any root):\n", .{counts.get(.test_only)});
+        Report.printGrouped(&project, findings.items, .test_only);
+    }
+
+    if (counts.get(.possible) > 0) {
+        std.debug.print("\n{d} possibly dead declaration(s) (only reached through a runtime-named @field(...)):\n", .{counts.get(.possible)});
+        Report.printGrouped(&project, findings.items, .possible);
     }
 
     if (error_count > 0) return 2;

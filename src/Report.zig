@@ -13,6 +13,16 @@ const Reachability = @import("Reachability.zig");
 const Scc = @import("Scc.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 
+/// What a finding means, and whether it should fail a build.
+///
+/// - `.dead`: nothing reaches it. A real finding.
+/// - `.possible`: only reached through an `.unknown` edge (a runtime-named
+///   `@field(...)`) from live code, so not certainly dead.
+/// - `.test_only`: unreachable from production roots, but reached from a
+///   `test { ... }` block (Phase 37). Test-support code, reported the way a
+///   test-only *file* already is rather than treated as dead.
+pub const Class = enum { dead, possible, test_only };
+
 pub const Finding = struct {
     id: SymbolId,
     /// Relative to the `base_dir` passed to `collect`. Owned.
@@ -27,9 +37,8 @@ pub const Finding = struct {
     /// Dead descendants folded into this finding — see
     /// `Reachability.deadSymbols`.
     nested: usize,
-    /// Only reached through an `.unknown` edge (a runtime-named
-    /// `@field(...)`) from live code: not certainly dead.
-    possible: bool,
+    /// Which of the three findings this is — see `Class`.
+    class: Class,
     /// Every member of the dead cycle this finding stands for, `id`
     /// included; empty for a plain declaration. Borrows `Scc`.
     cycle: []const SymbolId,
@@ -78,6 +87,7 @@ pub fn collect(
     dead: []const Reachability.Dead,
     scc: *const Scc,
     base_dir: []const u8,
+    test_reachable: *const Reachability,
 ) !std.ArrayListUnmanaged(Finding) {
     var findings: std.ArrayListUnmanaged(Finding) = .empty;
     errdefer deinit(&findings, gpa);
@@ -110,13 +120,21 @@ pub fn collect(
             .kind = kindOf(&sym),
             .name = sym.name,
             .nested = d.nested,
-            .possible = d.possible,
+            .class = classify(d, test_reachable),
             .cycle = cycle,
         });
     }
 
     std.mem.sort(Finding, findings.items, {}, Finding.lessThan);
     return findings;
+}
+
+/// A `.possible` finding stays `.possible` even when a test reaches it:
+/// what makes it uncertain is the `@field(...)` edge, not who walked there.
+fn classify(d: Reachability.Dead, test_reachable: *const Reachability) Class {
+    if (d.possible) return .possible;
+    if (test_reachable.isReachable(d.id)) return .test_only;
+    return .dead;
 }
 
 pub fn deinit(findings: *std.ArrayListUnmanaged(Finding), gpa: Allocator) void {
@@ -149,13 +167,12 @@ fn printSuffix(project: *const Project, finding: Finding) void {
 
 /// Prints `findings` grouped under one `  path` header per distinct file,
 /// each followed by its `line:column: kind name` entries. `findings` must
-/// already be sorted by path (as `collect` returns them); entries where
-/// `possible` doesn't match `want_possible` are skipped (dead vs.
-/// possibly-dead are reported in separate sections).
-pub fn printGrouped(project: *const Project, findings: []const Finding, want_possible: bool) void {
+/// already be sorted by path (as `collect` returns them); entries of a class
+/// other than `want` are skipped, since each class gets its own section.
+pub fn printGrouped(project: *const Project, findings: []const Finding, want: Class) void {
     var current_path: ?[]const u8 = null;
     for (findings) |f| {
-        if (f.possible != want_possible) continue;
+        if (f.class != want) continue;
         if (current_path == null or !std.mem.eql(u8, current_path.?, f.path)) {
             std.debug.print("\n  {s}\n", .{f.path});
             current_path = f.path;
