@@ -156,6 +156,12 @@ Status: Phase 0-16. Implemented so far:
   table form only needed to know which struct the loop capture stands for,
   and the table literal answers that for every iteration at once. Each
   element contributes its own candidate for the module name.
+- Inline `@import("m").member` (Phase 34): written mid-expression rather
+  than bound to a `const`, this has no binding whose references could be
+  walked — the nearest enclosing declaration is what `OwnerMap` reports,
+  and its references are references to *it*. The declaration containing the
+  import is now edged straight to the member, and the chain continues from
+  there (`@import("main").services_handler.collectServices`).
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

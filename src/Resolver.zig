@@ -107,6 +107,23 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
         // call itself, rather than the whole file root — see `aliasRoot`.
         const import_root = aliasRoot(&from_file.semantic, import_edge.node, target_semantic, &target_file.owner_map) orelse FILE_ROOT_SYMBOL;
 
+        // Phase 34: `@import("main").services_handler.collectServices`
+        // written inline, mid-expression, has no binding of its own whose
+        // references could be walked — `binding` is the nearest enclosing
+        // declaration, and its references are references to *it*. But that
+        // declaration is exactly what uses the member, so edge it here and
+        // let `addChain` carry the rest of the chain across. Harmless for
+        // the `const Schema = @import("json.zig").Schema;` shape: the same
+        // edge is what `buildAliasEdges` records, and duplicates are fine.
+        if (import_root != FILE_ROOT_SYMBOL) {
+            const owner_id: SymbolId = .{ .file = import_edge.from, .local = binding };
+            const target_id: SymbolId = .{ .file = import_edge.to, .local = import_root };
+            try graph.addEdge(gpa, owner_id, target_id, import_edge.node, .definite);
+            if (from_file.semantic.node_links.getParent(import_edge.node)) |field_node| {
+                try addChain(project, &graph, gpa, owner_id, import_edge.to, &from_file.semantic, target_semantic, &target_file.owner_map, import_root, field_node, .definite);
+            }
+        }
+
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
             const owner = from_file.owner_map.get(ref.node) orelse continue;

@@ -1452,3 +1452,45 @@ test "an instance method reached through an .? unwrap of a cross-file-typed opti
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a member reached through an inline @import(...).member expression is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\pub fn main() void {
+        \\    _ = dispatch;
+        \\}
+        \\const dispatch = [_]*const fn () u32{
+        \\    @import("handlers.zig").services_handler.collect,
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "handlers.zig",
+        \\pub const services_handler = struct {
+        \\    pub fn collect() u32 { return 1; }
+        \\    pub fn unusedOne() u32 { return 2; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}
