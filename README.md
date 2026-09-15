@@ -288,6 +288,10 @@ Status: Phase 0-16. Implemented so far:
   own start is now read as "this symbol's own type is the answer"; only landing
   back on the symbol being resolved still bails.
 
+- A `for` over a sliced expression (Phase 51): `for (snap.disks[0..snap
+  .disk_count]) |d|`. The bounds change how much is iterated, never the element
+  type, so the slice wrapper is stripped before the chain base is read.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

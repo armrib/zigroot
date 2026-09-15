@@ -2042,3 +2042,61 @@ test "an optional payload captured off a call-typed variable resolves" {
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a for loop over a sliced field resolves its element type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const snap_mod = @import("snap.zig");
+        \\
+        \\pub fn report(snap: snap_mod.Snapshot) void {
+        \\    for (snap.disks[0..snap.disk_count]) |d| {
+        \\        _ = d.slice();
+        \\    }
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    report(.{});
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "snap.zig",
+        \\pub const Disk = struct {
+        \\    path: [8]u8 = undefined,
+        \\    len: usize = 0,
+        \\    pub fn slice(self: *const Disk) []const u8 {
+        \\        return self.path[0..self.len];
+        \\    }
+        \\    pub fn unusedOne(self: *const Disk) usize {
+        \\        return self.len;
+        \\    }
+        \\};
+        \\
+        \\pub const Snapshot = struct {
+        \\    disks: [4]Disk = .{ .{}, .{}, .{}, .{} },
+        \\    disk_count: usize = 0,
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

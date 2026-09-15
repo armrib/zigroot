@@ -404,8 +404,16 @@ fn forElementInputBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?C
     if (idx >= for_full.ast.inputs.len) return null;
 
     var base_node = for_full.ast.inputs[idx];
-    while (ast.nodeTag(base_node) == .field_access) {
-        base_node = ast.nodeData(base_node).node_and_token[0];
+    while (true) {
+        switch (ast.nodeTag(base_node)) {
+            // Phase 51: `for (snap.disks[0..snap.disk_count]) |d|` — the
+            // bounds change how much is iterated, never the element type.
+            .slice, .slice_open, .slice_sentinel => {
+                base_node = (ast.fullSlice(base_node) orelse return null).ast.sliced;
+            },
+            .field_access => base_node = ast.nodeData(base_node).node_and_token[0],
+            else => break,
+        }
     }
     const base_sym = referenceAt(semantic, base_node) orelse return null;
     return .{ .sym = base_sym, .node = base_node };
