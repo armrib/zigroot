@@ -64,6 +64,12 @@ Status: Phase 0-16. Implemented so far:
   file-wide, so a `build.zig` split into stratified helpers (`fn
   wireAuth(b, fnd: Foundation)` importing `fnd.storage`) resolves through
   the field name alone when the caller's struct binding hasn't been seen yet.
+  A root module given as a field access (`b.addExecutable(.{ .root_module =
+  mods.main })`, where `mods` came from a local helper returning a struct of
+  modules) resolves the same way an `addImport`'s module argument does —
+  that's the shape a per-app `apps/<name>/build.zig` called as
+  `app_build.wire(b, ...)` from the aggregating `build.zig` typically uses,
+  and missing it costs a whole binary's reachability, not one declaration's.
 - `DynamicField` now also resolves `@field(...)` across an `@import`
   boundary (`@field(storage, "start")`), via the same target-file
   export-matching `Resolver` uses for `storage.start()`

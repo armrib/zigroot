@@ -274,7 +274,7 @@ pub fn parseInto(
 
         if (std.mem.eql(u8, field, "addTest")) {
             if (call.ast.params.len >= 1) {
-                if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
+                if (try testRootFromOptions(gpa, &tree, &bindings, &field_bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
                     errdefer gpa.free(path);
                     try result.test_roots.append(gpa, path);
                 }
@@ -289,7 +289,7 @@ pub fn parseInto(
                 result.has_library = true;
             }
             if (call.ast.params.len >= 1) {
-                if (try testRootFromOptions(gpa, &tree, &bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
+                if (try testRootFromOptions(gpa, &tree, &bindings, &field_bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
                     errdefer gpa.free(path);
                     try result.exe_roots.append(gpa, path);
                 }
@@ -486,13 +486,22 @@ fn cwdRelativePathToken(tree: *const Ast, node: Ast.Node.Index) ?Ast.TokenIndex 
 /// the older `.{ .root_source_file = b.path("...") }` shape (delegated to
 /// `rootSourceFileFromOptions`) or the current `.{ .root_module = <module>
 /// }` shape — `<module>` a local variable bound to a `createModule` call
-/// found earlier in the same scan, or an inline `b.createModule(...)` call
-/// — returns that module's root source file path, freshly allocated.
-/// `null` if neither shape matches, or the path couldn't be resolved.
+/// found earlier in the same scan, a field access into a struct of modules
+/// a local helper returned (`mods.main`, see `pathForBinding`), or an
+/// inline `b.createModule(...)` call — returns that module's root source
+/// file path, freshly allocated. `null` if neither shape matches, or the
+/// path couldn't be resolved.
+///
+/// The module-valued shapes all go through `pathForBinding`, the same
+/// resolution `addImport`'s second argument gets: an app binary declared as
+/// `b.addExecutable(.{ .root_module = mods.main })` is exactly as much a
+/// root as one declared with the module inline, and missing it costs a
+/// whole binary's reachability.
 fn testRootFromOptions(
     gpa: Allocator,
     tree: *const Ast,
     bindings: *const std.StringHashMapUnmanaged([]const u8),
+    field_bindings: *const std.StringHashMapUnmanaged([]const u8),
     options: Ast.Node.Index,
     struct_buf: *[2]Ast.Node.Index,
     call_buf: *[1]Ast.Node.Index,
@@ -506,9 +515,7 @@ fn testRootFromOptions(
         const name_tok = tree.firstToken(field_value) - 2;
         if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_module")) continue;
 
-        if (tree.nodeTag(field_value) == .identifier) {
-            const name = tree.tokenSlice(tree.nodeMainToken(field_value));
-            const path = bindings.get(name) orelse return null;
+        if (pathForBinding(tree, bindings, field_bindings, field_value)) |path| {
             return try gpa.dupe(u8, path);
         }
 

@@ -366,6 +366,86 @@ test "loadBuildGraph loads a b.addExecutable root_module as a project root with 
     try t.expect(project.isReachable(admin_path));
 }
 
+test "an app's own build.zig, called as alias.wire(b, ...), contributes its addExecutable and addTest roots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\const app_build = @import("apps/app/build.zig");
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = app_build.wire(b);
+        \\}
+        \\
+    );
+    // The app's binary is declared with a module the app's own helper
+    // returned bundled in a struct — `mods.main`, not a bare local — so
+    // this pins that shape end to end, and `b.path` staying build-root
+    // relative even though it's written in `apps/app/build.zig`.
+    try writeFile(tmp.dir, "apps/app/build.zig",
+        \\const std = @import("std");
+        \\const Mods = struct { main: *std.Build.Module, unit: *std.Build.Module };
+        \\
+        \\fn buildModules(b: *std.Build) Mods {
+        \\    const main_mod = b.createModule(.{ .root_source_file = b.path("apps/app/src/main.zig") });
+        \\    const unit_mod = b.createModule(.{ .root_source_file = b.path("apps/app/src/unit_test.zig") });
+        \\    return .{ .main = main_mod, .unit = unit_mod };
+        \\}
+        \\
+        \\pub fn wire(b: *std.Build) *std.Build.Step.Compile {
+        \\    const mods = buildModules(b);
+        \\    const exe = b.addExecutable(.{ .name = "app", .root_module = mods.main });
+        \\    b.installArtifact(exe);
+        \\    const unit = b.addTest(.{ .root_module = mods.unit });
+        \\    b.step("test", "").dependOn(&b.addRunArtifact(unit).step);
+        \\    return exe;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "apps/app/src/main.zig",
+        \\const admin = @import("admin.zig");
+        \\pub fn main() void {
+        \\    admin.handle();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "apps/app/src/admin.zig",
+        \\pub fn handle() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "apps/app/src/unit_test.zig",
+        \\const helper = @import("test_helper.zig");
+        \\test "unit" {
+        \\    helper.check();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "apps/app/src/test_helper.zig",
+        \\pub fn check() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const main_path = try tmp.dir.realpathAlloc(t.allocator, "apps/app/src/main.zig");
+    defer t.allocator.free(main_path);
+    const admin_path = try tmp.dir.realpathAlloc(t.allocator, "apps/app/src/admin.zig");
+    defer t.allocator.free(admin_path);
+    const helper_path = try tmp.dir.realpathAlloc(t.allocator, "apps/app/src/test_helper.zig");
+    defer t.allocator.free(helper_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+
+    try t.expectEqual(@as(usize, 1), project.roots.items.len);
+    try t.expect(project.isReachable(main_path));
+    try t.expect(project.isReachable(admin_path));
+    try t.expect(project.isTestOnly(helper_path));
+}
+
 test "loadBuildGraph follows a split-out helper file's b.path() calls relative to the build root, not the helper's own directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

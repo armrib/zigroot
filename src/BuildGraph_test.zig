@@ -482,6 +482,50 @@ test "records a b.addLibrary root_module bound to a local createModule variable 
     try t.expectEqualStrings("src/lib.zig", graph.exe_roots.items[0]);
 }
 
+test "records a b.addExecutable root_module field access into a helper's returned struct as an exe root" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const Mods = struct { main: *std.Build.Module, lib: *std.Build.Module };
+        \\fn buildMods(b: *std.Build) Mods {
+        \\    const lib_mod = b.createModule(.{ .root_source_file = b.path("src/lib.zig") });
+        \\    const main_mod = b.createModule(.{ .root_source_file = b.path("apps/app/src/main.zig") });
+        \\    main_mod.addImport("lib", lib_mod);
+        \\    return .{ .main = main_mod, .lib = lib_mod };
+        \\}
+        \\pub fn wire(b: *std.Build) void {
+        \\    const mods = buildMods(b);
+        \\    const exe = b.addExecutable(.{ .name = "app", .root_module = mods.main });
+        \\    _ = exe;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.exe_roots.items.len);
+    try t.expectEqualStrings("apps/app/src/main.zig", graph.exe_roots.items[0]);
+    try t.expect(graph.has_executable);
+}
+
+test "records a b.addTest root_module field access into a helper's returned struct as a test root" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\fn buildMods(b: *std.Build) struct { unit: *std.Build.Module } {
+        \\    const unit_mod = b.createModule(.{ .root_source_file = b.path("src/tests/unit.zig") });
+        \\    return .{ .unit = unit_mod };
+        \\}
+        \\pub fn wire(b: *std.Build) void {
+        \\    const mods = buildMods(b);
+        \\    const unit = b.addTest(.{ .root_module = mods.unit });
+        \\    _ = unit;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), graph.test_roots.items.len);
+    try t.expectEqualStrings("src/tests/unit.zig", graph.test_roots.items[0]);
+}
+
 test "a local variable name reused across sibling blocks doesn't leak the shadowed binding" {
     var graph = try parse(
         \\const std = @import("std");
