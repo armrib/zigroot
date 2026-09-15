@@ -813,6 +813,12 @@ fn declaredTypeDepth(project: *const Project, base: SymbolId, depth: usize) ?Sym
         return .{ .file = base.file, .local = ty };
     }
 
+    // Before `crossFileRoot`: that shortcut resolves one hop off whichever
+    // symbol the same-file walk stalled on, which for `&state.conns[i]` is
+    // `state` — handing back `State` and dropping the field and index hops
+    // that were the whole point. Walking the chain resolves them.
+    if (chainSourceType(project, base, depth)) |ty| return ty;
+
     if (InstanceType.crossFileRoot(semantic, owner_map, base.local)) |root| {
         if (importTargetRoot(project, base.file, root.base)) |target| {
             const target_file = project.file(target.file);
@@ -826,7 +832,10 @@ fn declaredTypeDepth(project: *const Project, base: SymbolId, depth: usize) ?Sym
         if (resolveTypeNode(project, base.file, type_node)) |ty| return ty;
     }
 
-    return chainSourceType(project, base, depth);
+    // Phase 42: last, because it is the most speculative — `const gz =
+    // compressGzip(...) catch null;` has no type written anywhere, only a
+    // callee whose declared return type has to be chased across files.
+    return callInstanceType(project, base.file, base.local);
 }
 
 /// Phase 35: `if (self.spoa) |sp| sp.onAccept(res);` written in a file that
@@ -850,6 +859,7 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
     // A chain that lands back on where it started (or on `base` itself)
     // has learned nothing, and recursing into it would not terminate.
     if (landed.eql(start) or landed.eql(base)) return null;
+    if (chain_base.landing_is_type) return landed;
     return declaredTypeDepth(project, landed, depth + 1);
 }
 

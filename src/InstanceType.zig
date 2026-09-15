@@ -268,7 +268,36 @@ fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, 
 pub fn chainSourceBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
     if (payloadCondBase(semantic, sym_id)) |base| return base;
     if (forElementInputBase(semantic, sym_id)) |base| return base;
-    return fieldAccessInitBase(semantic, sym_id);
+    if (fieldAccessInitBase(semantic, sym_id)) |base| return base;
+    return addressOfChainBase(semantic, sym_id);
+}
+
+/// The unwalked chain base of a `const c = &self.conns[i];` initializer —
+/// the same expression `addressOfChainWalk` walks same-file. `null` if
+/// `sym_id` isn't an un-annotated variable initialized from `&<chain>`.
+fn addressOfChainBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+    if (ast.nodeTag(init_node) != .address_of) return null;
+    const expr_node = ast.nodeData(init_node).node;
+
+    var base_node = expr_node;
+    while (true) {
+        switch (ast.nodeTag(base_node)) {
+            .field_access => base_node = ast.nodeData(base_node).node_and_token[0],
+            .array_access => base_node = ast.nodeData(base_node).node_and_node[0],
+            else => break,
+        }
+    }
+    if (base_node == expr_node) return null;
+    const base_sym = referenceAt(semantic, base_node) orelse return null;
+    return .{ .sym = base_sym, .node = base_node, .landing_is_type = true };
 }
 
 /// Where `base`'s chain lands, walked within this one file. `null` when the
@@ -322,6 +351,11 @@ fn thenPayloadCondExpr(ast: *const Ast, parent: Ast.Node.Index, then_expr: Ast.N
 pub const ChainBase = struct {
     sym: Semantic.Symbol.Id,
     node: Ast.Node.Index,
+    /// Whether walking this chain lands on the type itself rather than on a
+    /// declaration whose type still has to be read. `&h.arr[1]` lands on the
+    /// element type, because that is what the index hop meant; an `if (x.y)
+    /// |p|` payload lands on the field `y`, whose own type is the answer.
+    landing_is_type: bool = false,
 };
 
 /// If `sym_id` is a `for (seq) |x|` loop-payload capture, the base symbol

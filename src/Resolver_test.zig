@@ -1660,3 +1660,64 @@ test "a member of an inline anonymous struct literal is not reported dead" {
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "an &container.array[i] element method resolves when the struct is declared in another file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const loop = @import("loop.zig");
+        \\const dispatch = @import("dispatch.zig");
+        \\
+        \\pub fn main() void {
+        \\    var state = loop.State{};
+        \\    dispatch.run(&state);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "loop.zig",
+        \\pub const Conn = struct {
+        \\    n: u32 = 0,
+        \\    pub fn allocInflight(self: *Conn, tag: u32) void {
+        \\        self.n = tag;
+        \\    }
+        \\    pub fn unusedOne(self: *Conn) void {
+        \\        self.n = 0;
+        \\    }
+        \\};
+        \\
+        \\pub const State = struct {
+        \\    conns: [4]Conn = .{.{}} ** 4,
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "dispatch.zig",
+        \\const loop = @import("loop.zig");
+        \\
+        \\pub fn run(state: *loop.State) void {
+        \\    const c = &state.conns[0];
+        \\    c.allocInflight(7);
+        \\}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

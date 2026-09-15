@@ -228,6 +228,14 @@ Status: Phase 0-16. Implemented so far:
   return in another file. The chain is now walked with the whole project
   behind it, which pulled a further 29 formic findings out of *dead* and
   into *test-only*.
+- `&container.array[i]` across a file boundary (Phase 42): the same stall
+  Phase 35 fixed for captures, in the one shape it left out. The one-hop
+  `crossFileRoot` shortcut resolves a field off whichever symbol the
+  same-file walk stalled on — for `const c = &state.conns[i];` that is
+  `state`, so it answered `State` and dropped the field and index hops that
+  were the whole point. The full chain walk now runs first, and an
+  address-of chain is marked as landing on the element type itself rather
+  than on a declaration whose type still has to be read.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
