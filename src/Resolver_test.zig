@@ -1989,3 +1989,56 @@ test "a variable initialized from an if expression takes its branch's type" {
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "an optional payload captured off a call-typed variable resolves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const compress = @import("compress.zig");
+        \\
+        \\pub fn main() void {
+        \\    var gz = compress.compressGzip("x") catch null;
+        \\    if (gz) |*g| {
+        \\        g.deinit();
+        \\    }
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "compress.zig",
+        \\pub const Compressed = struct {
+        \\    data: []const u8,
+        \\    pub fn deinit(self: *Compressed) void {
+        \\        self.data = &.{};
+        \\    }
+        \\    pub fn unusedOne(self: *Compressed) void {
+        \\        self.data = &.{};
+        \\    }
+        \\};
+        \\
+        \\pub fn compressGzip(input: []const u8) !Compressed {
+        \\    return .{ .data = input };
+        \\}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

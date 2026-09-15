@@ -1050,9 +1050,12 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
     const start: SymbolId = .{ .file = base.file, .local = chain_base.sym };
     const landed = chainLanding(project, start, chain_base.node, depth) orelse return null;
 
-    // A chain that lands back on where it started (or on `base` itself)
-    // has learned nothing, and recursing into it would not terminate.
-    if (landed.eql(start) or landed.eql(base)) return null;
+    // A chain that lands back on `base` itself has learned nothing, and
+    // recursing into it would not terminate. Landing back on `start` is
+    // different: `if (gz) |*g|` has no hops to walk, so `g`'s type is
+    // whatever `gz`'s own is — reading it costs one more depth step, which
+    // `max_hop_depth` already bounds.
+    if (landed.eql(base)) return null;
     if (chain_base.landing_is_type) return landed;
     return declaredTypeDepth(project, landed, depth + 1);
 }

@@ -281,6 +281,13 @@ Status: Phase 0-16. Implemented so far:
   and `RESPONSE_MAX` read as dead. The flags now only land on a container
   that has a symbol of its own.
 
+- An optional payload captured off a call-typed variable (Phase 50): `var gz =
+  compressGzip(...) catch null; if (gz) |*g| g.deinit();`. The chain from `gz`
+  has no hops to walk, so it landed back on `gz` and a guard meant to stop
+  non-terminating recursion discarded the answer. Landing back on the chain's
+  own start is now read as "this symbol's own type is the answer"; only landing
+  back on the symbol being resolved still bails.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
