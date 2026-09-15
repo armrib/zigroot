@@ -1932,3 +1932,60 @@ test "an ambiguous module name resolves to the candidate that declares the field
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a variable initialized from an if expression takes its branch's type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const pools_mod = @import("pools.zig");
+        \\
+        \\pub fn dispatch(pools: *pools_mod.Pools, first: bool) void {
+        \\    const pool = if (first) pools.sa else pools.login;
+        \\    pool.onReap();
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    var p: pools_mod.Pools = .{ .sa = undefined, .login = undefined };
+        \\    dispatch(&p, true);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "pools.zig",
+        \\pub const Pool = struct {
+        \\    n: u32 = 0,
+        \\    pub fn onReap(self: *Pool) void {
+        \\        self.n += 1;
+        \\    }
+        \\    pub fn unusedOne(self: *Pool) void {
+        \\        self.n = 0;
+        \\    }
+        \\};
+        \\
+        \\pub const Pools = struct {
+        \\    sa: *Pool,
+        \\    login: *Pool,
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

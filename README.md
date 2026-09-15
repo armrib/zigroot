@@ -269,6 +269,11 @@ Status: Phase 0-16. Implemented so far:
   unreachable. The field being hopped disambiguates: only one candidate
   declares it.
 
+- A variable initialized from an `if` expression (Phase 48): `const pool = if
+  (tag.pool_id == SA_POOL_ID) pools.sa else pools.login;` has its type in the
+  branches and nowhere else. Both branches have to agree for the program to
+  compile, so the first that resolves is the answer.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

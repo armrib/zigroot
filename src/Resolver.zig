@@ -1000,10 +1000,36 @@ fn declaredTypeDepth(project: *const Project, base: SymbolId, depth: usize) ?Sym
         if (resolveTypeNode(project, base.file, type_node)) |ty| return ty;
     }
 
+    if (branchInitType(project, base, depth)) |ty| return ty;
+
     // Phase 42: last, because it is the most speculative — `const gz =
     // compressGzip(...) catch null;` has no type written anywhere, only a
     // callee whose declared return type has to be chased across files.
     return callInstanceType(project, base.file, base.local);
+}
+
+/// Phase 48: `const pool = if (tag.pool_id == SA_POOL_ID) pools.sa else
+/// pools.login;` — a variable whose initializer is an `if` expression has its
+/// type in the branches and nowhere else. Both branches have to agree for the
+/// program to compile, so the first one that resolves is the answer.
+fn branchInitType(project: *const Project, base: SymbolId, depth: usize) ?SymbolId {
+    const semantic = &project.file(base.file).semantic;
+    const symbol = semantic.symbols.get(base.local);
+    if (!symbol.flags.s_variable) return null;
+
+    const ast = &semantic.parse.ast;
+    const decl = ast.fullVarDecl(symbol.decl) orelse return null;
+    if (decl.ast.type_node.unwrap() != null) return null;
+    const init_node = decl.ast.init_node.unwrap() orelse return null;
+
+    const if_full = ast.fullIf(init_node) orelse return null;
+    const else_expr = if_full.ast.else_expr.unwrap() orelse if_full.ast.then_expr;
+    for ([_]Ast.Node.Index{ if_full.ast.then_expr, else_expr }) |branch| {
+        const landed = resolveValueChain(project, base.file, branch) orelse continue;
+        if (landed.eql(base)) continue;
+        if (declaredTypeDepth(project, landed, depth + 1)) |ty| return ty;
+    }
+    return null;
 }
 
 /// Phase 35: `if (self.spoa) |sp| sp.onAccept(res);` written in a file that
