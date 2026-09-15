@@ -306,6 +306,14 @@ Status: Phase 0-16. Implemented so far:
   hop is matched against its member list directly — the same trick Phase 43
   uses for an anonymous return type.
 
+- A multi-hop chain off an `anytype` parameter (Phase 54): `clearOnRing(server:
+  anytype)` calling `server.file_ops.unlink(ring, path)`. The whole-export-set
+  guess reached `file_ops` and stopped, leaving `FileOps.unlink` dead. When the
+  callee is a project function its body says exactly which chains it walks, so
+  those are re-walked against the type the call site actually passed — precise,
+  and past the first hop. The guess stays for a callee this project never
+  analyzes (`std.HashMap(K, V, Ctx, ...)`), where nothing can say.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

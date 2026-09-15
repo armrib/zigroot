@@ -318,6 +318,16 @@ fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const 
             for (call.ast.params, 0..) |arg, index| {
                 if (!isDuckTypedParam(project, file.id, call.ast.fn_expr, callee, index)) continue;
                 const ty = argumentType(project, file.id, arg) orelse continue;
+
+                // Phase 54: when the callee is a project function, its body
+                // says exactly which chains it walks off the parameter
+                // (`server.file_ops.unlink(...)`). Walking those against the
+                // concrete type beats guessing at its whole export set, and
+                // reaches past the first hop, which the guess never did.
+                if (callee) |fn_sym| {
+                    if (try walkDuckChains(gpa, graph, project, owner_id, fn_sym, index, ty)) continue;
+                }
+
                 const exports = project.file(ty.file).semantic.symbols.get(ty.local).exports;
                 for (exports.items) |member| {
                     try graph.addEdge(gpa, owner_id, .{ .file = ty.file, .local = member }, node, .unknown);
@@ -333,6 +343,60 @@ fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const 
 /// reached through an external module (`std.HashMap`). A callee that simply
 /// didn't resolve is *not* treated this way — most of those are ordinary
 /// method calls, and assuming the worst of them would edge half the project.
+/// Re-walks every `.field` chain the callee's `index`-th parameter is the
+/// base of, but against `ty` — the type the call site actually passed. Edges
+/// land on the call site's owner, since that is the code whose use of the
+/// argument justifies them. Returns whether any chain was walked at all;
+/// when none was, the caller falls back to the whole-export-set guess.
+fn walkDuckChains(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    project: *const Project,
+    owner_id: SymbolId,
+    fn_sym: SymbolId,
+    index: usize,
+    ty: SymbolId,
+) Allocator.Error!bool {
+    const param = paramSymbolAt(project, fn_sym, index) orelse return false;
+    const callee_file = project.file(fn_sym.file);
+    const ty_file = project.file(ty.file);
+
+    var walked = false;
+    var ref_it = callee_file.semantic.symbols.iterReferences(param);
+    while (ref_it.next()) |ref| {
+        try addChain(project, graph, gpa, owner_id, ty.file, &callee_file.semantic, &ty_file.semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
+        walked = true;
+    }
+    return walked;
+}
+
+/// The symbol bound to `fn_sym`'s `index`-th parameter, matched by the name
+/// token the prototype gives it. `null` for an unnamed parameter.
+fn paramSymbolAt(project: *const Project, fn_sym: SymbolId, index: usize) ?Semantic.Symbol.Id {
+    const semantic = &project.file(fn_sym.file).semantic;
+    const symbol = semantic.symbols.get(fn_sym.local);
+    if (!symbol.flags.s_fn) return null;
+
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, symbol.decl) orelse return null;
+
+    var it = proto.iterate(ast);
+    var i: usize = 0;
+    while (it.next()) |param| : (i += 1) {
+        if (i != index) continue;
+        const name_token = param.name_token orelse return null;
+
+        var sym_it = semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            const token = semantic.symbols.get(sym_id).token.unwrap() orelse continue;
+            if (token.int() == name_token) return sym_id;
+        }
+        return null;
+    }
+    return null;
+}
+
 fn isDuckTypedParam(
     project: *const Project,
     file_id: FileId,
