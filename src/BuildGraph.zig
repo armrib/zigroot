@@ -926,6 +926,15 @@ fn scanImportsField(
 /// in `bindings`, or a field access (`mods.foo`) into a struct a local
 /// helper function returned, recorded in `field_bindings` by
 /// `bindStructReturnFields`.
+///
+/// A field access with no `field_bindings` entry falls back to `bindings`
+/// keyed by the field name alone: a build.zig split into stratified helpers
+/// (`fn wireAuth(b, fnd: Foundation)` doing `x.addImport("storage",
+/// fnd.storage)`) references the struct through a *parameter*, and the
+/// single flat scan meets that body before the caller's `const fnd =
+/// wireFoundation(b)` binds `fnd.storage`. The field name is the same
+/// `createModule` variable the returning helper bound file-wide, so this is
+/// the same name-keyed over-approximation `bindings` already makes.
 fn pathForBinding(
     tree: *const Ast,
     bindings: *const std.StringHashMapUnmanaged([]const u8),
@@ -945,7 +954,8 @@ fn pathForBinding(
 
             var buf: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, field }) catch return null;
-            return field_bindings.get(key);
+            if (field_bindings.get(key)) |path| return path;
+            return bindings.get(field);
         },
         else => return null,
     }

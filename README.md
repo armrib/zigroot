@@ -60,7 +60,10 @@ Status: Phase 0-16. Implemented so far:
   their file instead of staying unresolved (`src/BuildGraph.zig`). Also
   extracts every `addExecutable`/`addLibrary`/`addTest` root module as a
   project root. Dependency modules (`b.dependency(...)`) stay unresolved,
-  since they aren't backed by a local file.
+  since they aren't backed by a local file. Bindings are name-keyed and
+  file-wide, so a `build.zig` split into stratified helpers (`fn
+  wireAuth(b, fnd: Foundation)` importing `fnd.storage`) resolves through
+  the field name alone when the caller's struct binding hasn't been seen yet.
 - `DynamicField` now also resolves `@field(...)` across an `@import`
   boundary (`@field(storage, "start")`), via the same target-file
   export-matching `Resolver` uses for `storage.start()`

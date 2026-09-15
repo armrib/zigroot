@@ -535,6 +535,47 @@ test "resolves an addImport value that's a field access into a helper's returned
     try t.expectEqualStrings("src/foo.zig", paths[0]);
 }
 
+test "resolves a field access through a helper parameter typed as an earlier helper's returned struct" {
+    // Stratified helpers: `wireAuth` reaches `fnd.storage` through its
+    // parameter, and its body precedes the caller's `const fnd = ...` in
+    // the flat scan, so only the field-name fallback can bind it.
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const Foundation = struct { storage: *std.Build.Module };
+        \\const Auth = struct { session: *std.Build.Module };
+        \\
+        \\fn wireFoundation(b: *std.Build) Foundation {
+        \\    const storage = b.createModule(.{ .root_source_file = b.path("src/storage.zig") });
+        \\    return .{ .storage = storage };
+        \\}
+        \\
+        \\fn wireAuth(b: *std.Build, fnd: Foundation) Auth {
+        \\    const session = b.createModule(.{ .root_source_file = b.path("src/session.zig") });
+        \\    session.addImport("storage", fnd.storage);
+        \\    return .{ .session = session };
+        \\}
+        \\
+        \\pub fn build(b: *std.Build) void {
+        \\    const fnd = wireFoundation(b);
+        \\    const auth = wireAuth(b, fnd);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("session", auth.session);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const storage = graph.resolve("storage").?;
+    try t.expectEqual(@as(usize, 1), storage.len);
+    try t.expectEqualStrings("src/storage.zig", storage[0]);
+    const session = graph.resolve("session").?;
+    try t.expectEqual(@as(usize, 1), session.len);
+    try t.expectEqualStrings("src/session.zig", session[0]);
+}
+
 test "paramFieldRequirements finds an addImport fed directly by an Options-struct field" {
     const source: [:0]const u8 =
         \\const std = @import("std");
