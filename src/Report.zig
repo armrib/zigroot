@@ -16,8 +16,9 @@ const SymbolId = @import("SymbolId.zig").SymbolId;
 /// What a finding means, and whether it should fail a build.
 ///
 /// - `.dead`: nothing reaches it. A real finding.
-/// - `.possible`: only reached through an `.unknown` edge (a runtime-named
-///   `@field(...)`) from live code, so not certainly dead.
+/// - `.possible`: only reached through an `.unknown` edge from live code —
+///   a runtime-named `@field(...)`, or a type handed to an `anytype`
+///   parameter or an external generic — so not certainly dead.
 /// - `.test_only`: unreachable from production roots, but reached from a
 ///   `test { ... }` block (Phase 37). Test-support code, reported the way a
 ///   test-only *file* already is rather than treated as dead.

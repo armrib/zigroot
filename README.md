@@ -208,6 +208,17 @@ Status: Phase 0-16. Implemented so far:
   `.lessThan` hop had nothing to resolve against — the one mention of the
   name in the whole project. The field name is now matched against the
   literal's own member list, edging the enclosing declaration to it.
+- Types handed to code that can't be read (Phase 40): `pwriteFull(FdWriter{
+  .fd = fd }, ...)` against a `writer: anytype` parameter, and `std.HashMap(K,
+  V, KeyContext, ...)` against a generic living in an external module. Both
+  reach into a container by a name that appears nowhere visible — the only
+  `write` caller is inside an `anytype` body, the only `hash` caller is
+  inside `std`. Which members get used isn't knowable, so every export of
+  the argument's type is edged at `.unknown`, landing those members in the
+  **possibly dead** section rather than the failing one. A callee that
+  merely didn't resolve is deliberately *not* treated this way: most of
+  those are ordinary method calls, and assuming the worst of them would
+  edge half the project.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

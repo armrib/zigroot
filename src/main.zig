@@ -188,7 +188,7 @@ pub fn main() !u8 {
     }
 
     if (counts.get(.possible) > 0) {
-        std.debug.print("\n{d} possibly dead declaration(s) (only reached through a runtime-named @field(...)):\n", .{counts.get(.possible)});
+        std.debug.print("\n{d} possibly dead declaration(s) (only reached through an edge that can't be pinned down):\n", .{counts.get(.possible)});
         Report.printGrouped(&project, findings.items, .possible);
     }
 

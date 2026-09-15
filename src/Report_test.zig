@@ -163,3 +163,60 @@ test "a helper only a test-only file reaches is test_only, not dead" {
     try t.expectEqual(Report.Class.dead, classOf(findings.items, "reachedByNothing").?);
     try t.expectEqual(@as(?Report.Class, null), classOf(findings.items, "shipped"));
 }
+
+test "a type handed to an anytype parameter is reached, at possible confidence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const FdWriter = struct {
+        \\    fd: u32,
+        \\    fn write(self: FdWriter, n: u32) u32 {
+        \\        return self.fd + n;
+        \\    }
+        \\};
+        \\
+        \\fn writeFull(writer: anytype, n: u32) u32 {
+        \\    return writer.write(n);
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    _ = writeFull(FdWriter{ .fd = 1 }, 2);
+        \\}
+        \\
+        \\fn reachedByNothing() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+    var scc = try Scc.build(t.allocator, &project, &cross_file);
+    defer scc.deinit(t.allocator);
+
+    var test_roots = try Roots.buildTestBlockRoots(t.allocator, &project);
+    defer test_roots.deinit(t.allocator);
+    try test_roots.roots.appendSlice(t.allocator, roots.roots.items);
+    var test_reachable = try Reachability.build(t.allocator, &project, &test_roots, &cross_file);
+    defer test_reachable.deinit(t.allocator);
+
+    var findings = try Report.collect(t.allocator, &project, dead.items, &scc, "", &test_reachable);
+    defer Report.deinit(&findings, t.allocator);
+
+    // Which member the `anytype` body picks isn't knowable, so `write` is
+    // reported as uncertain rather than dead — and never fails a build.
+    try t.expectEqual(Report.Class.possible, classOf(findings.items, "write").?);
+    try t.expectEqual(Report.Class.dead, classOf(findings.items, "reachedByNothing").?);
+}

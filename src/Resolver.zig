@@ -171,6 +171,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     try buildDeclLiterals(gpa, &graph, project);
     try buildAliasEdges(gpa, &graph, project);
     try buildAnonymousContainerMembers(gpa, &graph, project);
+    try buildDuckTypedArguments(gpa, &graph, project);
 
     return graph;
 }
@@ -217,6 +218,116 @@ fn symbolDeclaredAt(semantic: *const Semantic, node: Semantic.Ast.Node.Index) ?S
         if (semantic.symbols.get(sym_id).decl == node) return sym_id;
     }
     return null;
+}
+
+/// Phase 40: `pwriteFull(FdWriter{ .fd = fd }, bytes, offset)`, where
+/// `pwriteFull` declares `writer: anytype` and calls `writer.write(...)`;
+/// and `std.HashMap(K, V, KeyContext, ...)`, where the generic picking
+/// `hash`/`eql` off `KeyContext` lives in a module this project never
+/// analyzes. Both hand a container type to code that reaches into it by
+/// name, and in neither case does that name appear anywhere visible: the
+/// only `write` caller is inside an `anytype` body, the only `hash` caller
+/// is inside `std`. Which members get used is not knowable, so every export
+/// of the argument's type is edged at `.unknown` — the same standing
+/// `@field(Foo, runtime_name)` already has, and for the same reason.
+fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        const ast = &file.semantic.parse.ast;
+        for (0..ast.nodes.len) |raw| {
+            const node: Semantic.Ast.Node.Index = @enumFromInt(raw);
+            var call_buf: [1]Semantic.Ast.Node.Index = undefined;
+            const call = ast.fullCall(&call_buf, node) orelse continue;
+            const owner = ownerOf(&file, node) orelse continue;
+            const owner_id: SymbolId = .{ .file = file.id, .local = owner };
+
+            const callee = resolveValueChain(project, file.id, call.ast.fn_expr);
+            for (call.ast.params, 0..) |arg, index| {
+                if (!isDuckTypedParam(project, file.id, call.ast.fn_expr, callee, index)) continue;
+                const ty = argumentType(project, file.id, arg) orelse continue;
+                const exports = project.file(ty.file).semantic.symbols.get(ty.local).exports;
+                for (exports.items) |member| {
+                    try graph.addEdge(gpa, owner_id, .{ .file = ty.file, .local = member }, node, .unknown);
+                }
+            }
+        }
+    }
+}
+
+/// Whether argument `index` of a call to `callee` lands on a parameter whose
+/// members can be reached by a name this analysis can't see: an `anytype`
+/// parameter of a function it does see, or any parameter of a generic
+/// reached through an external module (`std.HashMap`). A callee that simply
+/// didn't resolve is *not* treated this way — most of those are ordinary
+/// method calls, and assuming the worst of them would edge half the project.
+fn isDuckTypedParam(
+    project: *const Project,
+    file_id: FileId,
+    fn_expr: Semantic.Ast.Node.Index,
+    callee: ?SymbolId,
+    index: usize,
+) bool {
+    if (callee) |fn_sym| return isAnytypeParam(project, fn_sym, index);
+    return callsExternalModule(project, file_id, fn_expr);
+}
+
+/// Whether `fn_sym`'s parameter at `index` is declared `anytype`.
+fn isAnytypeParam(project: *const Project, fn_sym: SymbolId, index: usize) bool {
+    const semantic = &project.file(fn_sym.file).semantic;
+    const symbol = semantic.symbols.get(fn_sym.local);
+    if (!symbol.flags.s_fn) return false;
+
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, symbol.decl) orelse return false;
+
+    var it = proto.iterate(ast);
+    var i: usize = 0;
+    while (it.next()) |param| : (i += 1) {
+        if (i != index) continue;
+        return param.type_expr == null and param.anytype_ellipsis3 != null;
+    }
+    return false;
+}
+
+/// Whether `fn_expr`'s base identifier is one of `file_id`'s `@import`
+/// bindings for a module outside this project (`std` and friends). The
+/// generic behind it is never analyzed, so nothing it names is visible.
+fn callsExternalModule(project: *const Project, file_id: FileId, fn_expr: Semantic.Ast.Node.Index) bool {
+    const file = project.file(file_id);
+    const ast = &file.semantic.parse.ast;
+
+    var base = fn_expr;
+    while (ast.nodeTag(base) == .field_access) {
+        base = ast.nodeData(base).node_and_token[0];
+    }
+    if (ast.nodeTag(base) != .identifier) return false;
+    const base_sym = InstanceType.referenceAt(&file.semantic, base) orelse return false;
+
+    for (project.import_graph.unresolved.items) |unresolved| {
+        if (unresolved.from != file_id) continue;
+        if (unresolved.reason != .external) continue;
+        const binding = file.owner_map.get(unresolved.node) orelse continue;
+        if (binding == base_sym) return true;
+    }
+    return false;
+}
+
+/// The container symbol an argument expression's *type* names: `Foo{...}`
+/// through its literal type, a bare `Foo`/`mod.Foo` through the chain it
+/// spells. `null` for a value whose type isn't written at the call site.
+fn argumentType(project: *const Project, file_id: FileId, arg: Semantic.Ast.Node.Index) ?SymbolId {
+    const semantic = &project.file(file_id).semantic;
+    const ast = &semantic.parse.ast;
+
+    var buf: [2]Ast.Node.Index = undefined;
+    if (ast.fullStructInit(&buf, arg)) |struct_init| {
+        const type_expr = struct_init.ast.type_expr.unwrap() orelse return null;
+        return resolveTypeNode(project, file_id, type_expr);
+    }
+    return switch (ast.nodeTag(arg)) {
+        .identifier, .field_access => resolveValueChain(project, file_id, arg),
+        else => null,
+    };
 }
 
 /// Phase 39: `std.mem.sort(T, xs, {}, struct { fn lessThan(...) ... }.lessThan)`
