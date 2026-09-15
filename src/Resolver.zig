@@ -859,6 +859,48 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
 /// resolving a *type* needs the landing symbol itself, not a graph
 /// contribution. `null` if the walk stops on a runtime-named `@field(...)`
 /// hop, whose landing is by definition not a single symbol.
+/// Phase 41: every symbol the `.field` chain from `start` (referenced at
+/// `start_node`) passes through or lands on, appended to `out`, resolved
+/// across `@import` boundaries the same way `addChain` does but recording no
+/// edges. A reference written straight inside a container-level `test { ...
+/// }` or `comptime { ... }` block has no owning declaration, so no graph edge
+/// ever carries it — `Roots` has to seed what such a block reaches, and
+/// seeding only the base symbol stops at the first hop `FieldChain` can't
+/// finish alone (`var pool = StringPool.init(...); pool.unmintFrom(...)`,
+/// where `pool`'s type comes from a call return).
+pub fn chainTargets(
+    gpa: Allocator,
+    project: *const Project,
+    start: SymbolId,
+    start_node: Semantic.Ast.Node.Index,
+    out: *std.ArrayListUnmanaged(SymbolId),
+) Allocator.Error!void {
+    const ast = &project.file(start.file).semantic;
+    var cur = start;
+    var node = start_node;
+    var kind: FieldChain.Kind = .definite;
+
+    var hops: usize = 0;
+    while (hops <= max_hop_depth) : (hops += 1) {
+        const cur_file = project.file(cur.file);
+        const chain = FieldChain.resolveChain(ast, &cur_file.semantic, &cur_file.owner_map, cur.local, node, kind);
+
+        for (chain.visitedSlice()) |through| {
+            try out.append(gpa, .{ .file = cur.file, .local = through });
+        }
+        try out.append(gpa, .{ .file = cur.file, .local = chain.result.symbol });
+        if (chain.unknown) |unknown| for (unknown.exports) |target| {
+            try out.append(gpa, .{ .file = cur.file, .local = target });
+        };
+
+        const step = chainStep(project, cur.file, &chain, 0) orelse return;
+        try out.append(gpa, step.next);
+        cur = step.next;
+        node = step.node;
+        kind = step.kind;
+    }
+}
+
 fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.Ast.Node.Index, depth: usize) ?SymbolId {
     const ast = &project.file(start.file).semantic;
     var cur = start;

@@ -219,6 +219,15 @@ Status: Phase 0-16. Implemented so far:
   merely didn't resolve is deliberately *not* treated this way: most of
   those are ordinary method calls, and assuming the worst of them would
   edge half the project.
+- What a `test`/`comptime` block reaches across a file boundary (Phase 41):
+  a reference written straight inside one of those blocks has no owning
+  declaration, so no graph edge ever carries it and `Roots` has to seed what
+  it reaches directly. That seeding was same-file only, and stopped at the
+  first hop `FieldChain` can't finish alone — `var pool = StringPool.init();
+  pool.unmintFrom(...)`, where `pool`'s type is only known from a call
+  return in another file. The chain is now walked with the whole project
+  behind it, which pulled a further 29 formic findings out of *dead* and
+  into *test-only*.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

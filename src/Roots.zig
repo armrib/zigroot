@@ -38,7 +38,7 @@ const Semantic = @import("semantic/Semantic.zig");
 const Project = @import("Project.zig");
 const File = @import("File.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
-const FieldChain = @import("FieldChain.zig");
+const Resolver = @import("Resolver.zig");
 
 const Roots = @This();
 
@@ -114,7 +114,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             while (ref_it.next()) |ref| {
                 if (f.owner_map.get(ref.node) != null) continue;
                 if (isInTestScope(semantic, ref.scope)) continue;
-                try roots.addBlockReference(gpa, &f, local, ref.node, .comptime_block);
+                try roots.addBlockReference(gpa, project, &f, local, ref.node, .comptime_block);
             }
         }
     }
@@ -154,7 +154,7 @@ pub fn buildTestBlockRoots(gpa: Allocator, project: *const Project) Allocator.Er
                 // no symbol answers for. In a test-only file that means any
                 // block, not just a `test` one.
                 if (!f.test_only and !isInTestScope(semantic, ref.scope)) continue;
-                try roots.addBlockReference(gpa, &f, local, ref.node, .test_block);
+                try roots.addBlockReference(gpa, project, &f, local, ref.node, .test_block);
             }
         }
     }
@@ -169,19 +169,23 @@ pub fn buildTestBlockRoots(gpa: Allocator, project: *const Project) Allocator.Er
 fn addBlockReference(
     self: *Roots,
     gpa: Allocator,
+    project: *const Project,
     f: *const File,
     local: Semantic.Symbol.Id,
     ref_node: Semantic.Ast.Node.Index,
     kind: RootKind,
 ) Allocator.Error!void {
-    try self.add(gpa, .{ .file = f.id, .local = local }, kind);
-    const semantic = &f.semantic;
-    const chain = FieldChain.resolveChain(semantic, semantic, &f.owner_map, local, ref_node, .definite);
-    for (chain.visitedSlice()) |through| {
-        try self.add(gpa, .{ .file = f.id, .local = through }, kind);
-    }
-    if (chain.result.symbol != local) {
-        try self.add(gpa, .{ .file = f.id, .local = chain.result.symbol }, kind);
+    const start: SymbolId = .{ .file = f.id, .local = local };
+    try self.add(gpa, start, kind);
+
+    // Phase 41: across `@import` boundaries, not just within this file — a
+    // block's references are the one kind no graph edge carries, so whatever
+    // the chain reaches has to be seeded here or not at all.
+    var targets: std.ArrayListUnmanaged(SymbolId) = .empty;
+    defer targets.deinit(gpa);
+    try Resolver.chainTargets(gpa, project, start, ref_node, &targets);
+    for (targets.items) |target| {
+        try self.add(gpa, target, kind);
     }
 }
 

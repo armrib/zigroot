@@ -220,3 +220,74 @@ test "a type handed to an anytype parameter is reached, at possible confidence" 
     try t.expectEqual(Report.Class.possible, classOf(findings.items, "write").?);
     try t.expectEqual(Report.Class.dead, classOf(findings.items, "reachedByNothing").?);
 }
+
+test "what a test block reaches through a call-typed variable is test_only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const pool = @import("pool.zig");
+        \\
+        \\pub fn main() void {
+        \\    var p = pool.StringPool.init();
+        \\    p.shipped();
+        \\}
+        \\
+        \\test "unmint" {
+        \\    var p = pool.StringPool.init();
+        \\    p.unmintFrom(1);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "pool.zig",
+        \\pub const StringPool = struct {
+        \\    n: u32 = 0,
+        \\    pub fn init() StringPool {
+        \\        return .{};
+        \\    }
+        \\    pub fn shipped(self: *StringPool) void {
+        \\        self.n = 1;
+        \\    }
+        \\    pub fn unmintFrom(self: *StringPool, id: u32) void {
+        \\        self.n = id;
+        \\    }
+        \\    pub fn reachedByNothing(self: *StringPool) void {
+        \\        self.n = 0;
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+    var scc = try Scc.build(t.allocator, &project, &cross_file);
+    defer scc.deinit(t.allocator);
+
+    var test_roots = try Roots.buildTestBlockRoots(t.allocator, &project);
+    defer test_roots.deinit(t.allocator);
+    try test_roots.roots.appendSlice(t.allocator, roots.roots.items);
+    var test_reachable = try Reachability.build(t.allocator, &project, &test_roots, &cross_file);
+    defer test_reachable.deinit(t.allocator);
+
+    var findings = try Report.collect(t.allocator, &project, dead.items, &scc, "", &test_reachable);
+    defer Report.deinit(&findings, t.allocator);
+
+    // `p`'s type is only known from `init`'s return, so the chain has to
+    // cross the `@import` before `unmintFrom` is reachable at all.
+    try t.expectEqual(Report.Class.test_only, classOf(findings.items, "unmintFrom").?);
+    try t.expectEqual(Report.Class.dead, classOf(findings.items, "reachedByNothing").?);
+    try t.expectEqual(@as(?Report.Class, null), classOf(findings.items, "shipped"));
+}
