@@ -818,6 +818,43 @@ fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
     return resolveTypeNode(project, fn_sym.file, return_node);
 }
 
+/// Phase 47: two `build.zig` files in one project can register the same
+/// module name for different files — `apps/iamd` and `apps/clusterd` both
+/// call theirs "scheduler". `Project` keeps every candidate and edges the
+/// one `@import` node to all of them, so taking the first silently lands in
+/// the wrong file and every hop off it fails. The field being hopped is what
+/// disambiguates: only one candidate declares it.
+fn hopThroughImport(project: *const Project, file_id: FileId, import_node: Ast.Node.Index, field: []const u8) ?SymbolId {
+    for (project.import_graph.edgesFrom(file_id)) |edge| {
+        if (edge.node != import_node) continue;
+        if (hop(project, .{ .file = edge.to, .local = FILE_ROOT_SYMBOL }, field)) |target| return target;
+    }
+    return null;
+}
+
+/// The `@import(...)` call node `node` names, either directly or through a
+/// one-step binding (`const scheduler_mod = @import("scheduler");`). `null`
+/// if `node` isn't an import in either shape.
+fn importCallSite(project: *const Project, file_id: FileId, node: Ast.Node.Index) ?Ast.Node.Index {
+    const semantic = &project.file(file_id).semantic;
+    if (isImportCall(semantic, node)) return node;
+
+    if (semantic.parse.ast.nodeTag(node) != .identifier) return null;
+    const sym = InstanceType.referenceAt(semantic, node) orelse return null;
+    const init_node = FieldChain.valueAliasInit(semantic, sym, .{}) orelse return null;
+    if (!isImportCall(semantic, init_node)) return null;
+    return init_node;
+}
+
+/// Whether `node` is an `@import(...)` builtin call.
+fn isImportCall(semantic: *const Semantic, node: Ast.Node.Index) bool {
+    const ast = &semantic.parse.ast;
+    return switch (ast.nodeTag(node)) {
+        .builtin_call_two, .builtin_call_two_comma => std.mem.eql(u8, semantic.tokenSlice(ast.nodeMainToken(node)), "@import"),
+        else => false,
+    };
+}
+
 /// Whether `node` is the bare `type` keyword — the return-type spelling of a
 /// generic type-returning function (`fn Walker(comptime V: type) type { ...
 /// }`), as opposed to a value's own type. ZLint parses it as a plain
@@ -843,8 +880,12 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
         },
         .field_access => blk: {
             const data = ast.nodeData(node).node_and_token;
+            const field = semantic.tokenSlice(data[1]);
+            if (importCallSite(project, file_id, data[0])) |import_node| {
+                break :blk hopThroughImport(project, file_id, import_node, field);
+            }
             const base = resolveValueChain(project, file_id, data[0]) orelse break :blk null;
-            break :blk hop(project, base, semantic.tokenSlice(data[1]));
+            break :blk hop(project, base, field);
         },
         // A bare `@import("x.zig")` in value position names the target
         // file's root — the whole file as a container.

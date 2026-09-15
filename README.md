@@ -261,6 +261,14 @@ Status: Phase 0-16. Implemented so far:
   propagates, following every edge kind — past that first guess there is
   nothing left to hedge.
 
+- An ambiguous module name (Phase 47): two `build.zig` files in one project can
+  register the same module name for different files — formic's `apps/iamd` and
+  `apps/clusterd` both call theirs "scheduler". Every candidate is edged from
+  the one `@import` node, and taking the first landed in the wrong file, so
+  every hop off it failed and the right file's whole export set read as
+  unreachable. The field being hopped disambiguates: only one candidate
+  declares it.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

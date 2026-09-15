@@ -1851,3 +1851,84 @@ test "a call through a function-pointer field resolves its return type" {
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "an ambiguous module name resolves to the candidate that declares the field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const other = b.createModule(.{
+        \\        .root_source_file = b.path("src/other_sched.zig"),
+        \\    });
+        \\    const mine = b.createModule(.{
+        \\        .root_source_file = b.path("src/sched.zig"),
+        \\    });
+        \\    const other_exe = b.addExecutable(.{
+        \\        .name = "other",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/other.zig") }),
+        \\    });
+        \\    other_exe.root_module.addImport("scheduler", other);
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("scheduler", mine);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/other_sched.zig",
+        \\pub const Other = struct {
+        \\    pub fn tick() void {}
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "src/other.zig",
+        \\const sched = @import("scheduler");
+        \\pub fn main() void {
+        \\    sched.Other.tick();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/sched.zig",
+        \\pub const Scheduler = struct {
+        \\    n: u32 = 0,
+        \\    pub fn start(self: *Scheduler) void {
+        \\        self.n += 1;
+        \\    }
+        \\    pub fn unusedOne(self: *Scheduler) void {
+        \\        self.n = 0;
+        \\    }
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\const Scheduler = @import("scheduler").Scheduler;
+        \\pub fn main() void {
+        \\    var s: Scheduler = .{};
+        \\    s.start();
+        \\}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_zig_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}
