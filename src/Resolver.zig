@@ -743,10 +743,10 @@ fn fnPointerReturnType(project: *const Project, sym: SymbolId, depth: usize) ?Sy
     const semantic = &project.file(sym.file).semantic;
     const chain_base = InstanceType.chainSourceBase(semantic, sym.local) orelse return null;
     const start: SymbolId = .{ .file = sym.file, .local = chain_base.sym };
-    const landed = chainLanding(project, start, chain_base.node, depth) orelse return null;
+    const landing = chainLanding(project, start, chain_base.node, depth) orelse return null;
 
-    if (landed.eql(start) or landed.eql(sym)) return null;
-    return fnPointerReturnType(project, landed, depth + 1);
+    if (landing.sym.eql(start) or landing.sym.eql(sym)) return null;
+    return fnPointerReturnType(project, landing.sym, depth + 1);
 }
 
 /// The type `sym`'s own annotation names as its return, if that annotation
@@ -1048,7 +1048,8 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
     const semantic = &project.file(base.file).semantic;
     const chain_base = InstanceType.chainSourceBase(semantic, base.local) orelse return null;
     const start: SymbolId = .{ .file = base.file, .local = chain_base.sym };
-    const landed = chainLanding(project, start, chain_base.node, depth) orelse return null;
+    const landing = chainLanding(project, start, chain_base.node, depth) orelse return null;
+    const landed = landing.sym;
 
     // A chain that lands back on `base` itself has learned nothing, and
     // recursing into it would not terminate. Landing back on `start` is
@@ -1056,7 +1057,7 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
     // whatever `gz`'s own is — reading it costs one more depth step, which
     // `max_hop_depth` already bounds.
     if (landed.eql(base)) return null;
-    if (chain_base.landing_is_type) return landed;
+    if (chain_base.landing_is_type or landing.is_type) return landed;
     return declaredTypeDepth(project, landed, depth + 1);
 }
 
@@ -1100,7 +1101,7 @@ pub fn chainTargets(
             try out.append(gpa, .{ .file = cur.file, .local = target });
         };
 
-        const step = chainStep(project, cur.file, &chain, 0) orelse return;
+        const step = chainStep(project, ast, cur.file, &chain, 0) orelse return;
         try out.append(gpa, step.next);
         cur = step.next;
         node = step.node;
@@ -1108,11 +1109,12 @@ pub fn chainTargets(
     }
 }
 
-fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.Ast.Node.Index, depth: usize) ?SymbolId {
+fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.Ast.Node.Index, depth: usize) ?Landing {
     const ast = &project.file(start.file).semantic;
     var cur = start;
     var node = start_node;
     var kind: FieldChain.Kind = .definite;
+    var stepped_to_type = false;
 
     var hops: usize = 0;
     while (hops <= max_hop_depth) : (hops += 1) {
@@ -1121,15 +1123,72 @@ fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.A
         if (chain.unknown != null) return null;
 
         const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
-        const step = chainStep(project, cur.file, &chain, depth) orelse return landed;
+        const step = chainStep(project, ast, cur.file, &chain, depth) orelse {
+            // A step that already yielded the type only counts if the walk
+            // stopped right there; a further hop off it lands on a member
+            // whose own declared type is the answer instead.
+            return .{ .sym = landed, .is_type = stepped_to_type and landed.eql(cur) };
+        };
         cur = step.next;
         node = step.node;
         kind = step.kind;
+        stepped_to_type = step.is_type;
     }
     return null;
 }
 
+/// Where a chain walk stopped, and whether that symbol *is* the type or is a
+/// declaration whose own type still has to be read (see `ChainBase`).
+const Landing = struct {
+    sym: SymbolId,
+    is_type: bool,
+};
+
+/// Phase 52: `redirect_uri_pending: std.ArrayListUnmanaged(RedirectUriRequest)`
+/// iterated as `for (self.redirect_uri_pending.items) |*existing|`. The
+/// container type comes from a module this project never analyzes, so there is
+/// no `items` to find and no return type to read — but the element type is
+/// written right there in the instantiation, as its first resolvable type
+/// argument. Only an `items` hop is matched: that is the one field name whose
+/// meaning is fixed across std's list types.
+fn genericElement(project: *const Project, ast: *const Semantic, base: SymbolId, node: Semantic.Ast.Node.Index) ?SymbolId {
+    // `node` indexes the AST the walk started in, which is not `base`'s file
+    // once the chain has crossed an `@import`.
+    const name = FieldChain.fieldAccessName(ast, node) orelse return null;
+    if (!std.mem.eql(u8, name, "items")) return null;
+
+    const semantic = &project.file(base.file).semantic;
+    const base_ast = &semantic.parse.ast;
+    for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
+        var buf: [1]Ast.Node.Index = undefined;
+        const call = base_ast.fullCall(&buf, type_node) orelse continue;
+        for (call.ast.params) |param| {
+            const ty = resolveTypeNode(project, base.file, param) orelse continue;
+            // The argument is usually spelled through a local alias
+            // (`const Req = types.Req;`), which has no members of its own.
+            return aliasTarget(project, ty);
+        }
+    }
+    return null;
+}
+
+/// Follows `resolveAlias` to the end, bounded like every other hop loop.
+fn aliasTarget(project: *const Project, start: SymbolId) SymbolId {
+    var cur = start;
+    var hops: usize = 0;
+    while (hops <= max_hop_depth) : (hops += 1) {
+        const next = resolveAlias(project, cur) orelse return cur;
+        if (next.eql(cur)) return cur;
+        cur = next;
+    }
+    return cur;
+}
+
 const ChainStep = struct {
+    /// Whether `next` is the type itself rather than a declaration whose
+    /// type still has to be read — true only for the generic-element step,
+    /// which reads a type argument straight out of an instantiation.
+    is_type: bool = false,
     next: SymbolId,
     node: Semantic.Ast.Node.Index,
     kind: FieldChain.Kind,
@@ -1140,15 +1199,19 @@ const ChainStep = struct {
 /// type. `null` when the chain isn't stuck (it's finished) or the stuck hop
 /// itself doesn't resolve (it's as finished as it will get) — `chainLanding`
 /// treats both the same way, by returning where the walk stopped.
-fn chainStep(project: *const Project, cur_file: FileId, chain: *const FieldChain.ChainWalk, depth: usize) ?ChainStep {
+fn chainStep(project: *const Project, ast: *const Semantic, cur_file: FileId, chain: *const FieldChain.ChainWalk, depth: usize) ?ChainStep {
     if (chain.stuck_alias) |stuck| {
         const aliased = resolveAlias(project, .{ .file = cur_file, .local = stuck.symbol }) orelse return null;
         if (aliased.file == cur_file and aliased.local == stuck.symbol) return null;
         return .{ .next = aliased, .node = stuck.node, .kind = stuck.kind };
     }
     if (chain.stuck) |stuck| {
-        const ty = declaredTypeDepth(project, .{ .file = cur_file, .local = stuck.symbol }, depth + 1) orelse return null;
-        return .{ .next = ty, .node = stuck.node, .kind = stuck.kind };
+        const stuck_id: SymbolId = .{ .file = cur_file, .local = stuck.symbol };
+        if (declaredTypeDepth(project, stuck_id, depth + 1)) |ty| {
+            return .{ .next = ty, .node = stuck.node, .kind = stuck.kind };
+        }
+        const element = genericElement(project, ast, stuck_id, stuck.node) orelse return null;
+        return .{ .next = element, .node = stuck.node, .kind = .possible, .is_type = true };
     }
     if (chain.stuck_call) |stuck_call| {
         const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse return null;

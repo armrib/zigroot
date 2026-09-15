@@ -2100,3 +2100,59 @@ test "a for loop over a sliced field resolves its element type" {
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a for loop over a std list's items resolves the element type" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const std = @import("std");
+        \\const types = @import("types.zig");
+        \\const Req = types.Req;
+        \\
+        \\const Prov = struct {
+        \\    pending: std.ArrayList(Req) = .empty,
+        \\
+        \\    pub fn submit(self: *Prov, req: Req) bool {
+        \\        for (self.pending.items) |done| {
+        \\            if (done.sameTarget(&req)) return true;
+        \\        }
+        \\        return false;
+        \\    }
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var p: Prov = .{};
+        \\    _ = p.submit(.{});
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "types.zig",
+        \\pub const Req = struct {
+        \\    n: u32 = 0,
+        \\    pub fn sameTarget(self: *const Req, other: *const Req) bool {
+        \\        return self.n == other.n;
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 0), dead.items.len);
+}

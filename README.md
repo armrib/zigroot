@@ -292,6 +292,14 @@ Status: Phase 0-16. Implemented so far:
   .disk_count]) |d|`. The bounds change how much is iterated, never the element
   type, so the slice wrapper is stripped before the chain base is read.
 
+- A hop off a generic container from an unanalyzed module (Phase 52):
+  `redirect_uri_pending: std.ArrayList(RedirectUriRequest)` iterated as `for
+  (self.redirect_uri_pending.items) |*existing|`. There is no `items` to find
+  and no return type to read, but the element type is written right there in
+  the instantiation. Only an `items` hop is matched — that is the one field
+  name whose meaning is fixed across std's list types — and the argument is
+  followed through the local alias it is usually spelled with.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
