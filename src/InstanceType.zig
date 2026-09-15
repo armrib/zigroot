@@ -249,6 +249,24 @@ fn payloadCondBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Chain
     return .{ .sym = base_sym, .node = base_node };
 }
 
+/// Phase 45: the callee node of an `if`/`while` optional-payload capture
+/// whose condition is a *call* rather than a chain — `if (f(ctx, id)) |log|`.
+/// `payloadCondBase` covers only the chain form, so this shape had no type
+/// at all. `null` for every other payload shape, or if the condition isn't
+/// a call.
+pub fn payloadCondCall(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?Ast.Node.Index {
+    const symbol = semantic.symbols.get(sym_id);
+    if (!symbol.flags.s_payload) return null;
+
+    const parent = semantic.node_links.getParent(symbol.decl) orelse return null;
+    const ast = &semantic.parse.ast;
+    const cond_expr = thenPayloadCondExpr(ast, parent, symbol.decl) orelse return null;
+
+    var buf: [1]Ast.Node.Index = undefined;
+    const call = ast.fullCall(&buf, cond_expr) orelse return null;
+    return call.ast.fn_expr;
+}
+
 /// The field/variable symbol a `const srv = self.srv;` initializer chain
 /// resolves to, walked within this one file (see `fieldAccessInitBase`).
 fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {

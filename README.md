@@ -244,6 +244,15 @@ Status: Phase 0-16. Implemented so far:
   return type's own member list, and the walk resumes from that member's
   declared type.
 
+- A call through a function-pointer field (Phases 44-45): `log_lookup_fn: ?*const
+  fn (ctx: ?*anyopaque, id: u8) ?*Log`, invoked as `if (self.log_lookup_fn) |f|
+  { if (f(ctx, id)) |log| ... }`. Two gaps met here. The callee is a field, not
+  a declaration with a body, so there was no `fn` symbol to read a return type
+  off — it is read from the field's own annotation instead, walking back to that
+  field the way Phase 35 walks back to any capture's source. And an `if`
+  payload whose condition is a *call* rather than a chain had no type at all —
+  the callee's return type is now resolved for that shape too.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

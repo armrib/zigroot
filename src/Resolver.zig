@@ -695,6 +695,11 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
         return resolveValueChain(project, file_id, type_arg);
     }
     const fn_expr = InstanceType.callInit(semantic, sym_id) orelse {
+        if (InstanceType.payloadCondCall(semantic, sym_id)) |callee| {
+            if (resolveValueChain(project, file_id, callee)) |callee_sym| {
+                if (resolveFnReturnType(project, callee_sym)) |ty| return ty;
+            }
+        }
         if (InstanceType.forElementSequenceSymbol(semantic, sym_id)) |seq_sym| {
             return callInstanceType(project, file_id, seq_sym);
         }
@@ -725,6 +730,52 @@ fn initChainType(project: *const Project, file_id: FileId, sym_id: Semantic.Symb
     return landed;
 }
 
+/// Phase 44: `log_lookup_fn: ?*const fn (ctx: ?*anyopaque, id: u8) ?*Log`
+/// called as `f(ctx, id)`, where `f` came from `if (self.log_lookup_fn) |f|`.
+/// The callee is a field, not a declaration with a body, so there is no `fn`
+/// symbol to read a return type off — the return type is written inline in
+/// the field's own annotation. Walk back to the field the way Phase 35 walks
+/// back to any capture's source, then read the proto there.
+fn fnPointerReturnType(project: *const Project, sym: SymbolId, depth: usize) ?SymbolId {
+    if (protoReturnType(project, sym)) |ty| return ty;
+    if (depth > max_hop_depth) return null;
+
+    const semantic = &project.file(sym.file).semantic;
+    const chain_base = InstanceType.chainSourceBase(semantic, sym.local) orelse return null;
+    const start: SymbolId = .{ .file = sym.file, .local = chain_base.sym };
+    const landed = chainLanding(project, start, chain_base.node, depth) orelse return null;
+
+    if (landed.eql(start) or landed.eql(sym)) return null;
+    return fnPointerReturnType(project, landed, depth + 1);
+}
+
+/// The type `sym`'s own annotation names as its return, if that annotation
+/// is a function pointer. The `?*const` a nullable callback field always
+/// carries is unwrapped first.
+fn protoReturnType(project: *const Project, sym: SymbolId) ?SymbolId {
+    const semantic = &project.file(sym.file).semantic;
+    const ast = &semantic.parse.ast;
+
+    for (InstanceType.declaredTypeNodes(semantic, sym.local).slice()) |type_node| {
+        var cur = type_node;
+        while (true) {
+            if (ast.fullPtrType(cur)) |ptr| {
+                cur = ptr.ast.child_type;
+            } else if (ast.nodeTag(cur) == .optional_type) {
+                cur = ast.nodeData(cur).node;
+            } else {
+                break;
+            }
+        }
+
+        var proto_buf: [1]Ast.Node.Index = undefined;
+        const proto = ast.fullFnProto(&proto_buf, cur) orelse continue;
+        const return_node = proto.ast.return_type.unwrap() orelse continue;
+        if (resolveTypeNode(project, sym.file, return_node)) |ty| return ty;
+    }
+    return null;
+}
+
 /// `fn_sym`'s declared return type, resolved across as many `@import`
 /// boundaries as needed — the shared tail of `callInstanceType` (a call-init
 /// variable's callee) and `addChain`'s `stuck_call` handling (a call used
@@ -734,6 +785,8 @@ fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
     const fn_semantic = &project.file(fn_sym.file).semantic;
     const fn_symbol = fn_semantic.symbols.get(fn_sym.local);
     if (!fn_symbol.flags.s_fn) {
+        if (fnPointerReturnType(project, fn_sym, 0)) |ty| return ty;
+
         // Calling something that isn't a function: a generic container
         // reached through an alias (`const Mixin = util.Bitflags;
         // Mixin(Flags)`) — unwrap the alias and retry once.
