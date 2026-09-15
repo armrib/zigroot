@@ -98,6 +98,9 @@ pub fn collect(
     for (dead) |d| {
         const sym = project.symbol(d.id);
         if (sym.name.len == 0) continue;
+        // Phase 38: a test-only file's own declarations are test code, not
+        // findings — the same standing a `test { ... }` block already has.
+        if (project.file(d.id.file).test_only) continue;
 
         var cycle: []const SymbolId = &.{};
         if (scc.componentOf(d.id)) |component| {

@@ -26,6 +26,10 @@ owner_map: OwnerMap,
 /// Same-file `Symbol -> Symbol` reference edges, built from `semantic`
 /// and `owner_map`. See `SymbolGraph`.
 symbol_graph: SymbolGraph,
+/// Phase 38: true for a file reached only through test code. Its own
+/// declarations are not findings, and everything it references is a test
+/// root rather than a production one — it *is* test code, wholesale.
+test_only: bool = false,
 /// Parse and semantic-analysis diagnostics the builder reported for this
 /// file. A file with any of these has a partial symbol table (the parser
 /// recovers as best it can), so its dead-symbol findings can't be trusted;

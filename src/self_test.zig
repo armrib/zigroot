@@ -59,12 +59,16 @@ test "self-run: analyzing this repository reports only the expected dead declara
     }
     var test_only: usize = 0;
     for (discovered.items) |path| {
-        if (project.isReachable(path)) continue;
-        if (!project.isTestOnly(path)) {
+        // Test-only first: Phase 38 loads those files, so they answer
+        // `isReachable` too, and only `isTestOnly` still tells them apart.
+        if (project.isTestOnly(path)) {
+            test_only += 1;
+            continue;
+        }
+        if (!project.isReachable(path)) {
             std.debug.print("unexpected orphan: {s}\n", .{path});
             return error.TestUnexpectedResult;
         }
-        test_only += 1;
     }
     try t.expect(test_only > 0);
 

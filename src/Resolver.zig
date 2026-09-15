@@ -73,6 +73,7 @@ const Semantic = @import("semantic/Semantic.zig");
 const Ast = Semantic.Ast;
 
 const Project = @import("Project.zig");
+const File = @import("File.zig");
 const ImportGraph = @import("ImportGraph.zig");
 const FileId = @import("FileId.zig").FileId;
 const SymbolId = @import("SymbolId.zig").SymbolId;
@@ -126,7 +127,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 
         var ref_it = from_file.semantic.symbols.iterReferences(binding);
         while (ref_it.next()) |ref| {
-            const owner = from_file.owner_map.get(ref.node) orelse continue;
+            const owner = ownerOf(from_file, ref.node) orelse continue;
             const owner_id: SymbolId = .{ .file = import_edge.from, .local = owner };
 
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
@@ -180,6 +181,19 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 /// bindings included, so a file used as a namespace also reaches its
 /// root (and, through `SymbolGraph`'s container→field edges, the types its
 /// top-level fields are declared with).
+/// Phase 38: the declaration a reference at `node` belongs to. A reference
+/// written straight inside a container-level `test { ... }` block has none —
+/// which is the whole point, since test code doesn't count as use. In a
+/// *test-only file* the entire file is that block, so the file's own root
+/// symbol stands in: `Roots.buildTestBlockRoots` seeds it, and a production
+/// walk can never reach it, because nothing outside test code imports such a
+/// file in the first place.
+fn ownerOf(file: *const File, node: Semantic.Ast.Node.Index) ?Semantic.Symbol.Id {
+    if (file.owner_map.get(node)) |owner| return owner;
+    if (file.test_only) return FILE_ROOT_SYMBOL;
+    return null;
+}
+
 fn buildAliasEdges(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
     for (project.files.items) |file| {
         var sym_it = file.semantic.symbols.iter();
@@ -275,7 +289,7 @@ fn buildStuckFieldChains(gpa: Allocator, graph: *SymbolGraph, project: *const Pr
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
-                const owner = file.owner_map.get(ref.node) orelse continue;
+                const owner = ownerOf(&file, ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
 
                 const chain = FieldChain.resolveChain(semantic, semantic, &file.owner_map, sym_id, ref.node, .definite);
@@ -343,7 +357,7 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
-                const owner = file.owner_map.get(ref.node) orelse continue;
+                const owner = ownerOf(&file, ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
                 try addChain(project, graph, gpa, owner_id, ty.file, semantic, target_semantic, &target_file.owner_map, ty.local, ref.node, .possible);
             }
@@ -423,7 +437,7 @@ fn buildCallInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const P
 
             var ref_it = semantic.symbols.iterReferences(sym_id);
             while (ref_it.next()) |ref| {
-                const owner = file.owner_map.get(ref.node) orelse continue;
+                const owner = ownerOf(&file, ref.node) orelse continue;
                 const owner_id: SymbolId = .{ .file = file.id, .local = owner };
                 try addChain(project, graph, gpa, owner_id, ty.file, semantic, ty_semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
             }

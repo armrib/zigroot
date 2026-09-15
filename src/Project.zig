@@ -198,6 +198,7 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
     }
 
     try self.resolveTestImports();
+    try self.loadTestOnlyFiles();
 }
 
 fn noteBuildFile(self: *Project, canonical: []const u8) !void {
@@ -383,7 +384,8 @@ pub fn symbol(self: *const Project, id: SymbolId) Semantic.Symbol {
 /// True iff some configured root transitively imports `path`, or it's one
 /// of the build script files `loadBuildGraph` scanned. Only meaningful for
 /// canonical paths (e.g. from `discoverZigFiles`). A test-only file is
-/// *not* reachable in this sense; see `isTestOnly`.
+/// loaded too (Phase 38), so ask `isTestOnly` first when the two need
+/// telling apart.
 pub fn isReachable(self: *const Project, canonical_path: []const u8) bool {
     return self.by_path.contains(canonical_path) or self.build_files.contains(canonical_path);
 }
@@ -413,6 +415,38 @@ pub fn addTestRoot(self: *Project, path: []const u8) !void {
     const canonical = try self.canonicalize(path);
     defer self.gpa.free(canonical);
     try self.markTestOnlyClosure(canonical);
+}
+
+/// Phase 38: loads every file `resolveTestImports` classified as test-only,
+/// tagging each `File.test_only`. They were previously parsed only far
+/// enough to read their imports, which left everything they reference
+/// looking unreferenced — a whole `staticd/src/tests/` directory's worth of
+/// production code reported dead because the only callers sat in files the
+/// analysis had deliberately thrown away. Loading them costs nothing in
+/// strictness: nothing in a test-only file becomes a production root, and
+/// its own declarations are not findings (see `Roots` and `Report`).
+///
+/// Must run after `resolveTestImports`, since `markTestOnlyClosure` stops
+/// at files already in `by_path` and this puts them there.
+pub fn loadTestOnlyFiles(self: *Project) !void {
+    var paths: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (paths.items) |p| self.gpa.free(p);
+        paths.deinit(self.gpa);
+    }
+
+    var it = self.test_only_files.keyIterator();
+    while (it.next()) |key| try paths.append(self.gpa, try self.gpa.dupe(u8, key.*));
+
+    for (paths.items) |path| {
+        _ = self.loadRecursive(path) catch continue;
+    }
+
+    // `loadRecursive` pulls in a test-only file's own imports too, so tag by
+    // membership afterwards rather than tagging the entry points only.
+    for (self.files.items) |*f| {
+        if (self.test_only_files.contains(f.path)) f.test_only = true;
+    }
 }
 
 /// Classifies the target of every `test`-block `@import` deferred by

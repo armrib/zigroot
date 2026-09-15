@@ -190,6 +190,17 @@ Status: Phase 0-16. Implemented so far:
   its own section, not a failure. `pub` declarations, orphan files and
   production code nothing but a test reaches are unaffected; only the
   reported class changes, and only for symbols a test actually reaches.
+- Test-only *files* (Phase 38): a file reached only through test code used
+  to be parsed just far enough to read its imports and then thrown away, so
+  everything it referenced looked unreferenced — a whole `src/tests/`
+  directory's worth of production code reported dead because its only
+  callers sat in files the analysis had deliberately discarded. Those files
+  are now loaded and tagged: they seed nothing as a production root, their
+  own declarations are not findings, and what they reference is test-only by
+  the Phase 37 rule. A reference written straight inside such a file's
+  `test { ... }` block has no owning declaration to hang an edge on, so it
+  is anchored at the file's own root symbol — which a production walk can
+  never reach, since nothing outside test code imports the file at all.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

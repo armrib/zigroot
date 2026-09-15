@@ -118,16 +118,17 @@ pub fn main() !u8 {
     var test_only: std.ArrayListUnmanaged([]const u8) = .empty;
     defer test_only.deinit(gpa);
     for (discovered.items) |path| {
-        if (project.isReachable(path)) continue;
+        // Test-only first: Phase 38 loads those files, so they answer
+        // `isReachable` too, and only `isTestOnly` still tells them apart.
         if (project.isTestOnly(path)) {
             try test_only.append(gpa, path);
-        } else {
+        } else if (!project.isReachable(path)) {
             try orphans.append(gpa, path);
         }
     }
 
     if (test_only.items.len > 0) {
-        std.debug.print("\n{d} test-only file(s) (not analyzed; test code doesn't count as use):\n", .{test_only.items.len});
+        std.debug.print("\n{d} test-only file(s) (no findings of their own; test code doesn't count as use):\n", .{test_only.items.len});
         for (test_only.items) |path| {
             std.debug.print("  {s}\n", .{relativePath(project.build_graph_dir, path)});
         }

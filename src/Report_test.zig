@@ -90,3 +90,76 @@ fn classOf(findings: []const Report.Finding, name: []const u8) ?Report.Class {
     }
     return null;
 }
+
+test "a helper only a test-only file reaches is test_only, not dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("main.zig") }),
+        \\    });
+        \\    b.installArtifact(exe);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "main.zig",
+        \\const support = @import("support.zig");
+        \\
+        \\pub fn main() void {
+        \\    support.shipped();
+        \\}
+        \\
+        \\test {
+        \\    _ = @import("helper_test.zig");
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "support.zig",
+        \\pub fn shipped() void {}
+        \\pub fn fixtureOnly() void {}
+        \\pub fn reachedByNothing() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "helper_test.zig",
+        \\const support = @import("support.zig");
+        \\test "fixture" {
+        \\    support.fixtureOnly();
+        \\}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_zig_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+    var scc = try Scc.build(t.allocator, &project, &cross_file);
+    defer scc.deinit(t.allocator);
+
+    var test_roots = try Roots.buildTestBlockRoots(t.allocator, &project);
+    defer test_roots.deinit(t.allocator);
+    try test_roots.roots.appendSlice(t.allocator, roots.roots.items);
+    var test_reachable = try Reachability.build(t.allocator, &project, &test_roots, &cross_file);
+    defer test_reachable.deinit(t.allocator);
+
+    var findings = try Report.collect(t.allocator, &project, dead.items, &scc, "", &test_reachable);
+    defer Report.deinit(&findings, t.allocator);
+
+    try t.expectEqual(Report.Class.test_only, classOf(findings.items, "fixtureOnly").?);
+    try t.expectEqual(Report.Class.dead, classOf(findings.items, "reachedByNothing").?);
+    try t.expectEqual(@as(?Report.Class, null), classOf(findings.items, "shipped"));
+}

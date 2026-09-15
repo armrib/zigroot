@@ -254,12 +254,24 @@ test "a b.addTest root_module and what only it imports are test-only files, not 
 
     try project.loadBuildGraph(build_zig_path);
 
-    try t.expectEqual(@as(usize, 1), project.files.items.len);
+    // Phase 38: all three are loaded — the two test-only ones so that what
+    // they reference resolves — but only `main.zig` is an analysis root, and
+    // the other two stay tagged test-only.
+    try t.expectEqual(@as(usize, 3), project.files.items.len);
     try t.expect(project.isReachable(root_path));
-    try t.expect(!project.isReachable(test_path));
-    try t.expect(!project.isReachable(admin_path));
     try t.expect(project.isTestOnly(test_path));
     try t.expect(project.isTestOnly(admin_path));
+    try t.expect(!testOnlyFlag(&project, root_path).?);
+    try t.expect(testOnlyFlag(&project, test_path).?);
+    try t.expect(testOnlyFlag(&project, admin_path).?);
+}
+
+/// `File.test_only` for the loaded file at `path`, or null if not loaded.
+fn testOnlyFlag(project: *const Project, path: []const u8) ?bool {
+    for (project.files.items) |f| {
+        if (std.mem.eql(u8, f.path, path)) return f.test_only;
+    }
+    return null;
 }
 
 test "an @import inside a test block is not followed; its target is a test-only file" {

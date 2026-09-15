@@ -92,6 +92,9 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
     }
 
     for (project.files.items) |f| {
+        // Phase 38: a test-only file seeds nothing here. Everything in it is
+        // test code, and test code doesn't count as use.
+        if (f.test_only) continue;
         const semantic = &f.semantic;
         const shared = isSharedDependency(project, f.path);
 
@@ -137,10 +140,20 @@ pub fn buildTestBlockRoots(gpa: Allocator, project: *const Project) Allocator.Er
         const semantic = &f.semantic;
         var it = semantic.symbols.iter();
         while (it.next()) |local| {
+            // Phase 38: in a test-only file every declaration is test code,
+            // so seed the lot — what it reaches is what the tests reach.
+            if (f.test_only) {
+                try roots.add(gpa, .{ .file = f.id, .local = local }, .test_block);
+            }
+
             var ref_it = semantic.symbols.iterReferences(local);
             while (ref_it.next()) |ref| {
                 if (f.owner_map.get(ref.node) != null) continue;
-                if (!isInTestScope(semantic, ref.scope)) continue;
+                // A reference an owning declaration would carry is already
+                // edged by `SymbolGraph`; these are the container-level ones
+                // no symbol answers for. In a test-only file that means any
+                // block, not just a `test` one.
+                if (!f.test_only and !isInTestScope(semantic, ref.scope)) continue;
                 try roots.addBlockReference(gpa, &f, local, ref.node, .test_block);
             }
         }
