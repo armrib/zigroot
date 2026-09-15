@@ -527,17 +527,25 @@ fn fieldAccessInitBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?C
         .@"catch", .@"orelse" => init_node = ast.nodeData(init_node).node_and_node[0],
         else => {},
     }
+    // Phase 55: `const sub = self.subs.items[i];` — an index hop lands on the
+    // element type itself, the same way `&state.conns[i]` does.
+    var landing_is_type = false;
     switch (ast.nodeTag(init_node)) {
         .identifier, .field_access => {},
+        .array_access => landing_is_type = true,
         else => return null,
     }
 
     var base_node = init_node;
-    while (ast.nodeTag(base_node) == .field_access) {
-        base_node = ast.nodeData(base_node).node_and_token[0];
+    while (true) {
+        switch (ast.nodeTag(base_node)) {
+            .field_access => base_node = ast.nodeData(base_node).node_and_token[0],
+            .array_access => base_node = ast.nodeData(base_node).node_and_node[0],
+            else => break,
+        }
     }
     const base_sym = referenceAt(semantic, base_node) orelse return null;
-    return .{ .sym = base_sym, .node = base_node };
+    return .{ .sym = base_sym, .node = base_node, .landing_is_type = landing_is_type };
 }
 
 pub const CrossFileRoot = struct {

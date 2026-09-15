@@ -1187,7 +1187,14 @@ fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.A
         if (chain.unknown != null) return null;
 
         const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
-        const step = chainStep(project, ast, cur.file, &chain, depth) orelse {
+        const step = chainStep(project, ast, cur.file, &chain, depth) orelse blk: {
+            // Phase 56: the walk can stop with hops still to go. `const sub =
+            // self.subs.items[i];` leaves `sub` no declared type node, so
+            // `FieldChain` has nothing to report as stuck and just ends on
+            // `sub` — silently dropping the `.principal` hop after it, and
+            // handing back `sub`'s own type as if it were the answer.
+            if (unconsumedHop(project, ast, cur, landed, &chain, depth)) |resumed| break :blk resumed;
+
             // A step that already yielded the type only counts if the walk
             // stopped right there; a further hop off it lands on a member
             // whose own declared type is the answer instead.
@@ -1234,6 +1241,28 @@ fn genericElement(project: *const Project, ast: *const Semantic, base: SymbolId,
         }
     }
     return null;
+}
+
+/// A resumption step for a chain that ended on `landed` with a `.field` hop
+/// still written after it — the walk stopped because `landed` has no declared
+/// type node of its own for `FieldChain` to report as stuck, not because the
+/// chain was finished. Resolving `landed`'s type and resuming from there
+/// consumes the remaining hops. `null` when there is no such hop, when the
+/// walk did make progress, or when the type doesn't resolve.
+fn unconsumedHop(
+    project: *const Project,
+    ast: *const Semantic,
+    cur: SymbolId,
+    landed: SymbolId,
+    chain: *const FieldChain.ChainWalk,
+    depth: usize,
+) ?ChainStep {
+    if (!landed.eql(cur)) return null;
+    if (FieldChain.fieldAccessName(ast, chain.result.node) == null) return null;
+
+    const ty = declaredTypeDepth(project, landed, depth + 1) orelse return null;
+    if (ty.eql(landed)) return null;
+    return .{ .next = ty, .node = chain.result.node, .kind = .possible };
 }
 
 /// Phase 53: the member named by the `.field` hop at `node` (a node in

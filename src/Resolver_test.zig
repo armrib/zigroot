@@ -2216,3 +2216,86 @@ test "a method on an anonymous union payload type resolves across a file boundar
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "an element read out of a std list by index carries its methods" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const std = @import("std");
+        \\const hub = @import("hub.zig");
+        \\
+        \\pub fn main() void {
+        \\    var h: hub = .{ .subs = .empty };
+        \\    h.dropExpired(0);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "auth.zig",
+        \\pub const Principal = union(enum) {
+        \\    root,
+        \\    iam: struct { expires_at: i64 },
+        \\
+        \\    pub fn isExpired(self: Principal, now_ms: i64) bool {
+        \\        return switch (self) {
+        \\            .root => false,
+        \\            .iam => |c| now_ms >= c.expires_at,
+        \\        };
+        \\    }
+        \\    pub fn unusedOne(self: Principal) bool {
+        \\        _ = self;
+        \\        return false;
+        \\    }
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "hub.zig",
+        \\const std = @import("std");
+        \\const auth = @import("auth.zig");
+        \\
+        \\pub const Subscriber = struct {
+        \\    fd: i32 = -1,
+        \\    principal: ?auth.Principal = null,
+        \\};
+        \\
+        \\const Self = @This();
+        \\
+        \\subs: std.ArrayList(Subscriber),
+        \\
+        \\pub fn dropExpired(self: *Self, now_ms: i64) void {
+        \\    var i: usize = 0;
+        \\    while (i < self.subs.items.len) {
+        \\        const sub = self.subs.items[i];
+        \\        const expired = if (sub.principal) |p| p.isExpired(now_ms) else false;
+        \\        if (expired) i += 1;
+        \\        i += 1;
+        \\    }
+        \\}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    var found_unused = false;
+    for (dead.items) |d| {
+        const name = project.symbol(d.id).name;
+        try t.expect(!std.mem.eql(u8, name, "isExpired"));
+        if (std.mem.eql(u8, name, "unusedOne")) found_unused = true;
+    }
+    try t.expect(found_unused);
+}

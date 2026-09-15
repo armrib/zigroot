@@ -314,6 +314,15 @@ Status: Phase 0-16. Implemented so far:
   and past the first hop. The guess stays for a callee this project never
   analyzes (`std.HashMap(K, V, Ctx, ...)`), where nothing can say.
 
+- An element read out of a list by index (Phases 55-56): `const sub = self.subs
+  .items[i]; if (sub.principal) |p| p.isExpired(now_ms)`. Two gaps. An index hop
+  in a plain initializer wasn't a chain base at all (only `&x.arr[i]` was), and
+  it lands on the element type the same way. And `sub` ends up with no declared
+  type node, so the chain walk off it had nothing to report as stuck and simply
+  stopped — silently dropping the `.principal` hop written after it and handing
+  back `sub`'s own type. A walk that stops with a hop still to go now resolves
+  the landing's type and resumes.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
