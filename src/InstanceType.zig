@@ -110,6 +110,9 @@ pub fn resolve(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Se
         return resolve(semantic, owner_map, source);
     }
     if (addressOfChainTarget(semantic, owner_map, sym_id)) |target| return target;
+    if (addressOfChainSource(semantic, owner_map, sym_id)) |source| {
+        return resolve(semantic, owner_map, source);
+    }
     const candidates = declaredTypeNodes(semantic, sym_id);
     for (candidates.slice()) |type_node| {
         if (resolveTypeExpr(semantic, owner_map, type_node)) |ty| return ty;
@@ -167,6 +170,7 @@ pub fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) 
     }
     return out;
 }
+
 
 /// A function parameter symbol's declared type node, with one leading
 /// pointer unwrapped (`self: *Foo` -> `Foo`'s node, `self: Foo` -> `Foo`'s
@@ -340,6 +344,34 @@ pub fn forElementSequenceSymbol(semantic: *const Semantic, sym_id: Semantic.Symb
 /// doesn't resolve same-file (e.g. it's stuck on an `@import` boundary or a
 /// runtime-named `@field`).
 fn addressOfChainTarget(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const chain = addressOfChainWalk(semantic, owner_map, sym_id) orelse return null;
+    if (chain.unknown != null or chain.stuck != null) return null;
+    return chain.result.symbol;
+}
+
+/// Phase 31: the cross-file half of `addressOfChainTarget`. `var parser =
+/// &self.parsers[id];`, where `parsers: []http_mod.Parser`, walks the same
+/// chain but gets stuck on the indexed hop, because the element type it
+/// would land on lives in another file and `InstanceType` has no `Project`
+/// to follow the `@import` with. The symbol it stuck on is the slice field
+/// itself, whose own declared type is the `base.field` expression
+/// `crossFileRoot` knows how to hand to `Resolver` — so recursing into it
+/// resolves the element type the same way an explicit `var parser:
+/// *http_mod.Parser` annotation already did. Indexing drops out for free:
+/// unwrapping `[]T` to `T` is exactly what the index hop meant.
+fn addressOfChainSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const chain = addressOfChainWalk(semantic, owner_map, sym_id) orelse return null;
+    if (chain.unknown != null) return null;
+    const stuck = chain.stuck orelse return null;
+    if (stuck.symbol == sym_id) return null;
+    return stuck.symbol;
+}
+
+/// The shared walk behind `addressOfChainTarget` and `addressOfChainSource`:
+/// `sym_id`'s initializer as a chain of `.field`/`[index]` hops off an
+/// identifier, resolved as far as one file allows. `null` when `sym_id`
+/// isn't an un-annotated variable initialized from `&<chain>`.
+fn addressOfChainWalk(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?FieldChain.ChainWalk {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_variable) return null;
 
@@ -362,9 +394,7 @@ fn addressOfChainTarget(semantic: *const Semantic, owner_map: *const OwnerMap, s
     if (base_node == expr_node) return null;
     const base_sym = referenceAt(semantic, base_node) orelse return null;
 
-    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
-    if (chain.unknown != null or chain.stuck != null) return null;
-    return chain.result.symbol;
+    return FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
 }
 
 /// If `sym_id` is a variable (`var`/`const`) with no explicit type
@@ -435,6 +465,9 @@ pub fn crossFileRoot(semantic: *const Semantic, owner_map: *const OwnerMap, sym_
         return crossFileRoot(semantic, owner_map, source);
     }
     if (fieldAccessInitSource(semantic, owner_map, sym_id)) |source| {
+        return crossFileRoot(semantic, owner_map, source);
+    }
+    if (addressOfChainSource(semantic, owner_map, sym_id)) |source| {
         return crossFileRoot(semantic, owner_map, source);
     }
     const candidates = declaredTypeNodes(semantic, sym_id);

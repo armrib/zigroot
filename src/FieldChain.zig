@@ -185,6 +185,16 @@ fn resolveChainInner(ast: *const Semantic, symbols: *const Semantic, owner_map: 
             break;
         }
 
+        // An `.?` is pure unwrapping, not a hop onto a new symbol: the
+        // payload type is `current.symbol`'s own declared type minus its
+        // leading `?`, which `InstanceType` strips anyway. Stepping the node
+        // over it lets the `.field` hop after it resolve against the same
+        // container, instead of the walk ending on the unwrap.
+        if (optionalUnwrapNode(ast, current.node)) |unwrap_node| {
+            current = .{ .symbol = current.symbol, .node = unwrap_node, .kind = current.kind };
+            continue;
+        }
+
         if (arrayAccessNode(ast, current.node)) |access_node| {
             // Mirrors the `fieldAccessName` stuck-fallback above: an
             // unresolved `type_resolved` means `container` fell back to
@@ -286,6 +296,18 @@ pub fn fieldAccessName(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?[]c
 /// resolved, is already unwrapped onto it so a further `.field` hop off it
 /// resolves against the element rather than the array/slice. `null` if
 /// `node` isn't an array-access operand.
+/// If `node` is the operand of an `.?` optional unwrap (`node.?`), the
+/// unwrap node itself. The payload's type is whatever `node`'s own declared
+/// type is once the leading `?` comes off, which `InstanceType`'s type-expr
+/// unwrapping already does — so a chain only has to step over the `.?` to
+/// keep hopping (`self.spoa.?.onRecv()`). `null` if `node` isn't unwrapped.
+pub fn optionalUnwrapNode(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    const parent = ast.node_links.getParent(node) orelse return null;
+    if (ast.parse.ast.nodeTag(parent) != .unwrap_optional) return null;
+    if (ast.parse.ast.nodeData(parent).node_and_token[0] != node) return null;
+    return parent;
+}
+
 pub fn arrayAccessNode(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
     const parent = ast.node_links.getParent(node) orelse return null;
     if (ast.parse.ast.nodeTag(parent) != .array_access) return null;

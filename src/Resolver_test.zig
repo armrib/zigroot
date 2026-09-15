@@ -1347,3 +1347,108 @@ test "a bare use of a value alias reaches what it names, and an intermediate hop
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("Unused", project.symbol(dead.items[0].id).name);
 }
+
+test "an instance method reached through &self.slice[i] on a cross-file element type is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const engine = @import("engine.zig");
+        \\pub fn main() void {
+        \\    var e: engine.Engine = undefined;
+        \\    _ = e.run(0);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "engine.zig",
+        \\const http = @import("http.zig");
+        \\pub const Engine = struct {
+        \\    parsers: []http.Parser,
+        \\    pub fn run(self: *Engine, id: usize) u32 {
+        \\        var parser = &self.parsers[id];
+        \\        return parser.feed();
+        \\    }
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "http.zig",
+        \\pub const Parser = struct {
+        \\    state: u32 = 0,
+        \\    pub fn feed(self: *Parser) u32 { return self.state; }
+        \\    pub fn unusedOne(self: *Parser) u32 { return self.state; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}
+
+test "an instance method reached through an .? unwrap of a cross-file-typed optional field is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const engine = @import("engine.zig");
+        \\pub fn main() void {
+        \\    var e: engine.Engine = undefined;
+        \\    _ = e.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "engine.zig",
+        \\const http = @import("http.zig");
+        \\pub const Engine = struct {
+        \\    parser: ?*http.Parser = null,
+        \\    pub fn run(self: *Engine) u32 {
+        \\        return self.parser.?.feed();
+        \\    }
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "http.zig",
+        \\pub const Parser = struct {
+        \\    state: u32 = 0,
+        \\    pub fn feed(self: *Parser) u32 { return self.state; }
+        \\    pub fn unusedOne(self: *Parser) u32 { return self.state; }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

@@ -123,6 +123,16 @@ Status: Phase 0-16. Implemented so far:
   with syntax errors has a partial symbol table, so its findings can't be
   trusted.
 
+- `&self.slice[i]` (Phase 31): an un-annotated variable initialized from an
+  `address_of` chain whose indexed hop lands on an element type in *another*
+  file used to give up, because `InstanceType` has no `Project` to follow the
+  `@import` with. It now hands the slice field it stuck on to `crossFileRoot`,
+  so `Resolver` finishes the hop — `var p = &self.parsers[id]; p.feed();`
+  reaches `feed` the same way an explicit `var p: *http.Parser` annotation did.
+- `.?` unwraps (Phase 31) are stepped over inside a chain rather than ending
+  it: `self.spoa.?.onRecv()` resolves against the optional's payload type, the
+  same as the `if (self.spoa) |s| s.onRecv()` capture already did.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
