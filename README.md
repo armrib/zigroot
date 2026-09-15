@@ -274,6 +274,13 @@ Status: Phase 0-16. Implemented so far:
   branches and nowhere else. Both branches have to agree for the program to
   compile, so the first that resolves is the answer.
 
+- A field declared after an inline `enum` field (Phase 49, in the vendored
+  semantic layer): `state: enum { free, reading }` marked the *enclosing*
+  struct `s_enum`, after which every later field's type expression went
+  unvisited — so `write_buf: [RESPONSE_MAX]u8` recorded no reference at all
+  and `RESPONSE_MAX` read as dead. The flags now only land on a container
+  that has a symbol of its own.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

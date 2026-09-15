@@ -32,6 +32,14 @@ import paths were rewritten for the flattened layout (`../Semantic.zig` →
   are removed. `build(source)` already takes the sentinel slice directly,
   which is the only entry point zigroot uses. `Error.source_name` is no
   longer filled in; the caller knows which file it built.
+- `Builder.zig`: an anonymous container written as a container field's type
+  (`state: enum { free, reading }`) no longer stamps its flags onto the
+  *enclosing* container's symbol. Upstream marked the enclosing struct
+  `s_enum`, after which `visitContainerField` skipped every later field's
+  type expression, so identifiers named there (`write_buf: [RESPONSE_MAX]u8`)
+  got no reference recorded at all. A new `_in_field_type` state guards both
+  `visitContainer`'s and `visitErrorSetDecl`'s flag writes, and is cleared
+  again by `visitVarDecl`, which does push a symbol of its own.
 - `test/util.zig`: no graphical reporter or `Source`; analysis errors are
   printed plainly. `debugSemantic` (needed ZLint's `printer`) is removed.
 - `test/modules_test.zig`: the `withSource` leak test is removed with the

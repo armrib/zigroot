@@ -23,6 +23,11 @@ _curr_reference_flags: Reference.Flags = .{ .read = true },
 /// reset this themselves. Although `visitBlock` will reset these flags, if a
 /// non-block node is encountered, it will not be reset.
 _next_block_scope_flags: Scope.Flags = .{},
+/// Whether the visitor is inside a container field's type expression. An
+/// anonymous container spelled there (`state: enum { free, reading }`) has
+/// no symbol of its own, so `currentContainerSymbol` is still the enclosing
+/// struct — stamping the container's flags onto it would mislabel it.
+_in_field_type: bool = false,
 
 // stacks
 _scope_stack: std.ArrayList(Semantic.Scope.Id) = .{},
@@ -565,7 +570,13 @@ fn visitContainer(self: *SemanticBuilder, node: NodeIndex, container: full.Conta
         }
     }
 
-    self.currentContainerSymbolFlags().set(symbol_flags, true);
+    // Not while visiting a field's type expression: `state: enum { free,
+    // reading }` would mark the *enclosing* struct `s_enum`, and
+    // `visitContainerField` then skips every later field's type expression
+    // — dropping the only reference to whatever it names.
+    if (!self._in_field_type) {
+        self.currentContainerSymbolFlags().set(symbol_flags, true);
+    }
     const prev_symbol_flags = self._curr_symbol_flags;
     self._curr_symbol_flags.set(symbol_flags, true);
     defer self._curr_symbol_flags = prev_symbol_flags;
@@ -587,7 +598,11 @@ fn visitErrorSetDecl(self: *SemanticBuilder, node_id: NodeIndex) !void {
 
     try self.enterScope(.{ .flags = .{ .s_error = true } });
     defer self.exitScope();
-    self.currentContainerSymbolFlags().s_error = true;
+    // Same reason as `visitContainer`: an `error { ... }` written as a
+    // field's type has no symbol of its own to mark.
+    if (!self._in_field_type) {
+        self.currentContainerSymbolFlags().s_error = true;
+    }
 
     while (curr_tok > 0) {
         curr_tok -= 1;
@@ -651,6 +666,9 @@ fn visitContainerField(self: *SemanticBuilder, node_id: NodeIndex, field: full.C
     // causes a segfault in release builds
     const flags: []const Symbol.Flags = self.symbolTable().symbols.items(.flags);
     if (!flags[parent].s_enum) {
+        const prev_in_field_type = self._in_field_type;
+        self._in_field_type = true;
+        defer self._in_field_type = prev_in_field_type;
         try self.visitOptionalType(field.ast.type_expr);
     }
     try self.visitOptional(field.ast.value_expr);
@@ -708,6 +726,11 @@ fn visitVarDecl(self: *SemanticBuilder, node_id: NodeIndex, var_decl: full.VarDe
     });
     try self.enterContainerSymbol(symbol_id);
     defer self.exitContainerSymbol();
+    // A declaration inside a field's anonymous container type has a symbol
+    // of its own again, so the guard above must not carry into it.
+    const prev_in_field_type = self._in_field_type;
+    self._in_field_type = false;
+    defer self._in_field_type = prev_in_field_type;
     try self.visitOptionalType(var_decl.ast.type_node);
 
     try self.visitOptional(var_decl.ast.init_node);

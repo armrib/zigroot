@@ -773,3 +773,43 @@ test "what a possibly-reached symbol uses is possibly reached, not dead" {
     try t.expect(!reachability.isReachable(.{ .file = file_id, .local = helper }));
     try t.expect(reachability.isPossiblyReachable(.{ .file = file_id, .local = helper }));
 }
+
+test "a field's array length stays referenced after an inline enum field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const RESPONSE_MAX: usize = 4096;
+        \\
+        \\const Conn = struct {
+        \\    state: enum { free, reading } = .free,
+        \\    write_buf: [RESPONSE_MAX]u8 = undefined,
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var c: Conn = .{};
+        \\    c.write_buf[0] = 1;
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const max = semantic.symbols.getSymbolNamed("RESPONSE_MAX").?;
+    try t.expect(reachability.isReachable(.{ .file = file_id, .local = max }));
+}
