@@ -254,3 +254,84 @@ test "a symbol referenced from a container-level comptime block is a comptime_bl
     try t.expect(found_forced);
     try t.expect(found_register);
 }
+
+test "a pub declaration in a file outside the project root is a public_api root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "proj/build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const sdk = b.createModule(.{
+        \\        .root_source_file = b.path("../shared/sdk.zig"),
+        \\    });
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    exe.root_module.addImport("sdk", sdk);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "proj/src/main.zig",
+        \\const sdk = @import("sdk");
+        \\pub fn main() void {
+        \\    _ = sdk.verify();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "shared/sdk.zig",
+        \\pub fn verify() u32 {
+        \\    return 1;
+        \\}
+        \\pub fn usedOnlyByAnotherProject() u32 {
+        \\    return 2;
+        \\}
+        \\fn privateHelper() u32 {
+        \\    return 3;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "proj/src/local.zig",
+        \\pub fn neverCalled() u32 {
+        \\    return 4;
+        \\}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "proj/build.zig");
+    defer t.allocator.free(build_zig_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_zig_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    // The shared file's `pub` API is rooted; its private helper is not, and
+    // neither is a `pub` declaration inside the project's own tree.
+    var public_api_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer public_api_names.deinit(t.allocator);
+    for (roots.roots.items) |root| {
+        if (root.kind != .public_api) continue;
+        // The file-root symbol carries no name and is `pub` in every file;
+        // it stands for the container, not a declaration.
+        const name = project.symbol(root.symbol).name;
+        if (name.len == 0) continue;
+        try public_api_names.append(t.allocator, name);
+    }
+
+    try t.expectEqual(@as(usize, 2), public_api_names.items.len);
+    try t.expect(hasName(public_api_names.items, "verify"));
+    try t.expect(hasName(public_api_names.items, "usedOnlyByAnotherProject"));
+    try t.expect(!hasName(public_api_names.items, "privateHelper"));
+    try t.expect(!hasName(public_api_names.items, "neverCalled"));
+}
+
+fn hasName(names: []const []const u8, wanted: []const u8) bool {
+    for (names) |name| {
+        if (std.mem.eql(u8, name, wanted)) return true;
+    }
+    return false;
+}

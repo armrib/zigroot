@@ -9,8 +9,10 @@
 //! - `.export`: any symbol with ZLint's `s_export` flag (`export fn`,
 //!   `export var`), since those are reachable from outside the compiled
 //!   binary regardless of internal references.
-//! - `.public_api`: every `pub` symbol, but only under `PublicPolicy.root`
-//!   (library mode) — see `PublicPolicy`.
+//! - `.public_api`: every `pub` symbol, under `PublicPolicy.root` (library
+//!   mode) — see `PublicPolicy` — or, whatever the policy, in a file
+//!   outside the analyzed `build.zig`'s own directory, which this project
+//!   shares with consumers it can't see (`isSharedDependency`).
 //! - `.comptime_block`: every symbol referenced from a container-level
 //!   `comptime { ... }` block (`comptime { _ = Foo; }`, the idiom for
 //!   forcing analysis of a declaration). Zig evaluates such a block
@@ -86,6 +88,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
 
     for (project.files.items) |f| {
         const semantic = &f.semantic;
+        const shared = isSharedDependency(project, f.path);
 
         var it = semantic.symbols.iter();
         while (it.next()) |local| {
@@ -93,7 +96,7 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             if (sym.flags.s_export) {
                 try roots.add(gpa, .{ .file = f.id, .local = local }, .@"export");
             }
-            if (public_policy == .root and sym.visibility == .public) {
+            if (sym.visibility == .public and (public_policy == .root or shared)) {
                 try roots.add(gpa, .{ .file = f.id, .local = local }, .public_api);
             }
 
@@ -116,6 +119,27 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
     }
 
     return roots;
+}
+
+/// Phase 36: whether `path` sits outside the directory holding the
+/// `build.zig` being analyzed — a file this project reaches through a `..`
+/// path, and therefore one it shares with projects this run can't see. A
+/// monorepo's `sdks/` copy, built into a backend *and* into six demos, is
+/// the case in point: judged from the backend alone, everything only the
+/// demos call reads as unreachable, and the only way to "fix" that finding
+/// is to delete working code. So a shared file's `pub` declarations are
+/// treated as external API, exactly as library mode treats the whole
+/// project's. Its non-`pub` declarations are still checked normally —
+/// nothing outside the file can reach those whatever else builds it.
+///
+/// Inert when no `build.zig` was loaded at all (`build_graph_dir` empty),
+/// which is how the tests drive `Project` directly.
+fn isSharedDependency(project: *const Project, path: []const u8) bool {
+    const root_dir = project.build_graph_dir;
+    if (root_dir.len == 0) return false;
+    if (!std.mem.startsWith(u8, path, root_dir)) return true;
+    if (path.len == root_dir.len) return false;
+    return path[root_dir.len] != std.fs.path.sep;
 }
 
 /// True if `scope_id`, or any of its ancestors, was created by a `test`

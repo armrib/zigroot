@@ -172,6 +172,15 @@ Status: Phase 0-16. Implemented so far:
   symbol it stalled on, and that wrong answer masked the cross-file retry.
   The walk now reports a stall as unresolved, and the resolver re-walks the
   same chain with the whole project behind it.
+- Files the project reaches outside its own tree (Phase 36): a monorepo
+  `sdks/` copy built into a backend *and* into six demos is judged here
+  from the backend alone, so everything only the demos call reads as
+  unreachable — and the only way to "fix" such a finding is to delete
+  working code. A file outside the analyzed `build.zig`'s own directory
+  now has its `pub` declarations treated as external API, the same way
+  library mode treats the whole project's. Its non-`pub` declarations are
+  still checked: nothing outside the file can reach those whatever else
+  builds it.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
