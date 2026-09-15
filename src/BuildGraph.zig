@@ -218,45 +218,20 @@ pub fn parseInto(
     var call_buf: [1]Ast.Node.Index = undefined;
     var struct_buf: [2]Ast.Node.Index = undefined;
 
+    // Every binding first, then everything that reads one. A `build.zig`
+    // that stratifies into helpers declares `wireExe` — which says
+    // `addImport("mph", shared.mph)` — above the `wire()` that binds
+    // `const shared = wireShared(...)`, so a single pass meets `shared.mph`
+    // before it knows what `shared` is and drops the module. Nothing in the
+    // binding pass records a root, so hoisting it can only add resolutions.
+    try collectBindings(gpa, &tree, &bindings, &import_aliases, &field_bindings, file_imports, resolver);
+
     var i: u32 = 0;
     while (i < tree.nodes.len) : (i += 1) {
         const node: Ast.Node.Index = @enumFromInt(i);
 
-        if (tree.fullVarDecl(node)) |var_decl| {
-            const init_node = var_decl.ast.init_node.unwrap() orelse continue;
-            const var_name_tok = var_decl.ast.mut_token + 1;
-            const var_name = tree.tokenSlice(var_name_tok);
-
-            if (rootSourceFileOfCreateModule(&tree, init_node, &call_buf, &struct_buf)) |rel_path| {
-                const path = parseStringLiteral(gpa, &tree, rel_path) catch continue;
-                errdefer gpa.free(path);
-                try putBinding(gpa, &bindings, var_name, path);
-                continue;
-            }
-
-            if (tree.fullCall(&call_buf, init_node)) |call| {
-                if (nameAndRootSourceFileOfAddModule(&tree, call, &struct_buf)) |found| {
-                    const path = parseStringLiteral(gpa, &tree, found.path) catch continue;
-                    errdefer gpa.free(path);
-                    try putBinding(gpa, &bindings, var_name, path);
-                    continue;
-                }
-
-                if (try resolveCrossFileHelper(gpa, &tree, resolver, &import_aliases, call)) |path| {
-                    errdefer gpa.free(path);
-                    try putBinding(gpa, &bindings, var_name, path);
-                    continue;
-                }
-
-                try bindStructReturnFields(gpa, &tree, &bindings, &field_bindings, var_name, call, &struct_buf);
-            }
-
-            if (localFileImportPath(&tree, init_node)) |path_tok| {
-                const path = parseStringLiteral(gpa, &tree, path_tok) catch continue;
-                errdefer gpa.free(path);
-                try file_imports.append(gpa, path);
-                try import_aliases.put(gpa, var_name, path_tok);
-            }
+        if (tree.fullVarDecl(node) != null) {
+            try bindVarDecl(gpa, &tree, node, &bindings, &import_aliases, &field_bindings, null, resolver);
             continue;
         }
 
@@ -269,7 +244,35 @@ pub fn parseInto(
             continue;
         }
 
+        if (tree.fullFor(node)) |for_full| {
+            try scanRootTableLoop(gpa, &tree, result, for_full);
+            continue;
+        }
+
         const call = tree.fullCall(&call_buf, node) orelse continue;
+
+        // A bare-identifier callee is a local helper, never `b.<method>`, so
+        // it can only declare a root through the shape
+        // `rootParamOfLocalHelper` recognizes. Checking it here keeps the
+        // dispatch below reading as a flat list of `b.<method>` names.
+        if (tree.nodeTag(call.ast.fn_expr) == .identifier) {
+            const helper_name = tree.tokenSlice(tree.nodeMainToken(call.ast.fn_expr));
+            if (rootParamOfLocalHelper(&tree, helper_name)) |found| {
+                if (found.index < call.ast.params.len) {
+                    const arg = call.ast.params[found.index];
+                    if (tree.nodeTag(arg) == .string_literal) {
+                        const path = parseStringLiteral(gpa, &tree, tree.nodeMainToken(arg)) catch continue;
+                        errdefer gpa.free(path);
+                        switch (found.kind) {
+                            .test_root => try result.test_roots.append(gpa, path),
+                            .exe_root => try result.exe_roots.append(gpa, path),
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         const field = fieldAccessName(&tree, call.ast.fn_expr) orelse continue;
 
         if (std.mem.eql(u8, field, "addTest")) {
@@ -382,6 +385,79 @@ fn localFileImportPath(tree: *const Ast, node: Ast.Node.Index) ?Ast.TokenIndex {
     const tok = tree.nodeMainToken(params[0]);
     if (!std.mem.endsWith(u8, tree.tokenSlice(tok), ".zig\"")) return null;
     return tok;
+}
+
+/// The binding half of `parseInto`'s scan, hoisted into its own pass over
+/// every node: local variables bound to a module's root source file, to a
+/// local-file `@import`, or to a struct of modules a helper returned. See
+/// `parseInto` for why this can't share the pass that reads them.
+fn collectBindings(
+    gpa: Allocator,
+    tree: *const Ast,
+    bindings: *std.StringHashMapUnmanaged([]const u8),
+    import_aliases: *std.StringHashMapUnmanaged(Ast.TokenIndex),
+    field_bindings: *std.StringHashMapUnmanaged([]const u8),
+    file_imports: *std.ArrayListUnmanaged([]u8),
+    resolver: ?HelperResolver,
+) !void {
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        const node: Ast.Node.Index = @enumFromInt(i);
+        try bindVarDecl(gpa, tree, node, bindings, import_aliases, field_bindings, file_imports, resolver);
+    }
+}
+
+/// Binds whatever `node` declares, if it declares anything this cares about.
+/// `file_imports` is null on the second pass: the `@import` list is built
+/// once, by `collectBindings`, while the bindings themselves are rebuilt in
+/// source order so a name shadowed by a sibling block (`{ const m = ...; }`
+/// repeated per test) still resolves to its own block's module at the point
+/// that block's `addTest` is read.
+fn bindVarDecl(
+    gpa: Allocator,
+    tree: *const Ast,
+    node: Ast.Node.Index,
+    bindings: *std.StringHashMapUnmanaged([]const u8),
+    import_aliases: *std.StringHashMapUnmanaged(Ast.TokenIndex),
+    field_bindings: *std.StringHashMapUnmanaged([]const u8),
+    file_imports: ?*std.ArrayListUnmanaged([]u8),
+    resolver: ?HelperResolver,
+) !void {
+    var call_buf: [1]Ast.Node.Index = undefined;
+    var struct_buf: [2]Ast.Node.Index = undefined;
+
+    const var_decl = tree.fullVarDecl(node) orelse return;
+    const init_node = var_decl.ast.init_node.unwrap() orelse return;
+    const var_name = tree.tokenSlice(var_decl.ast.mut_token + 1);
+
+    if (rootSourceFileOfCreateModule(tree, init_node, &call_buf, &struct_buf)) |rel_path| {
+        const path = parseStringLiteral(gpa, tree, rel_path) catch return;
+        errdefer gpa.free(path);
+        return putBinding(gpa, bindings, var_name, path);
+    }
+
+    if (tree.fullCall(&call_buf, init_node)) |call| {
+        if (nameAndRootSourceFileOfAddModule(tree, call, &struct_buf)) |found| {
+            const path = parseStringLiteral(gpa, tree, found.path) catch return;
+            errdefer gpa.free(path);
+            return putBinding(gpa, bindings, var_name, path);
+        }
+
+        if (try resolveCrossFileHelper(gpa, tree, resolver, import_aliases, call)) |path| {
+            errdefer gpa.free(path);
+            return putBinding(gpa, bindings, var_name, path);
+        }
+
+        try bindStructReturnFields(gpa, tree, bindings, field_bindings, var_name, call, &struct_buf);
+    }
+
+    const imports = file_imports orelse return;
+    if (localFileImportPath(tree, init_node)) |path_tok| {
+        const path = parseStringLiteral(gpa, tree, path_tok) catch return;
+        errdefer gpa.free(path);
+        try imports.append(gpa, path);
+        try import_aliases.put(gpa, var_name, path_tok);
+    }
 }
 
 /// If `node` is `<ident>.createModule(.{ ..., .root_source_file =
@@ -571,11 +647,17 @@ fn passThroughPathParamIndex(tree: *const Ast, proto: Ast.full.FnProto, body: As
     if (tree.nodeTag(arg) != .identifier) return null;
     const arg_name = tree.tokenSlice(tree.nodeMainToken(arg));
 
+    return paramIndexNamed(tree, proto, arg_name);
+}
+
+/// The index of `proto`'s parameter named `name`, so a call site's argument
+/// list can be indexed the same way the body's use of the parameter was.
+fn paramIndexNamed(tree: *const Ast, proto: Ast.full.FnProto, name: []const u8) ?usize {
     var it = proto.iterate(tree);
     var index: usize = 0;
     while (it.next()) |param| : (index += 1) {
         const name_tok = param.name_token orelse continue;
-        if (std.mem.eql(u8, tree.tokenSlice(name_tok), arg_name)) return index;
+        if (std.mem.eql(u8, tree.tokenSlice(name_tok), name)) return index;
     }
     return null;
 }
@@ -854,6 +936,260 @@ fn findFnDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
         const proto = tree.fullFnProto(&buf, node) orelse continue;
         const name_tok = proto.name_token orelse continue;
         if (std.mem.eql(u8, tree.tokenSlice(name_tok), name)) return node;
+    }
+    return null;
+}
+
+/// How a `b.path(...)` expression inside a `build.zig` helper reaches the
+/// string that names the file: as the helper's own parameter, as a field of
+/// a loop capture (`pt.path`), or as a tuple slot of one (`tc[1]`).
+const PathAccessor = union(enum) {
+    field: []const u8,
+    index: u32,
+};
+
+/// Which list a resolved root belongs in. `has_executable`/`has_library`
+/// are set by the plain `addExecutable`/`addLibrary` scan whether or not
+/// the path resolved, so recognizing more roots here can never flip a
+/// project into or out of library mode.
+const RootKind = enum { test_root, exe_root };
+
+/// Phase 32: if `fn_name` names a local function whose body is `const m =
+/// b.createModule(.{ .root_source_file = b.path(<param>) }); ...
+/// b.addTest(.{ .root_module = m })`, the index of `<param>` and the kind of
+/// root it declares — so the string literal each call site passes there is
+/// a root.
+///
+/// Registering N test files by calling one local helper per file
+/// (`addModuleTest(b, opts, "domains/agent/supervision_test.zig", ...)`) is
+/// how a large `build.zig` stays readable, and every file registered that
+/// way was otherwise an orphan: reachable by no import, declared by no root
+/// zigroot could see. The path is a literal at the call site, so nothing
+/// needs evaluating — only the hop from argument position to parameter
+/// name, which is why resolving it syntactically is sound.
+fn rootParamOfLocalHelper(tree: *const Ast, fn_name: []const u8) ?struct { index: usize, kind: RootKind } {
+    const fn_decl = findFnDecl(tree, fn_name) orelse return null;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = tree.fullFnProto(&proto_buf, fn_decl) orelse return null;
+    const body = tree.nodeData(fn_decl).node_and_node[1];
+
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, body) orelse return null;
+
+    var call_buf: [1]Ast.Node.Index = undefined;
+    var struct_buf: [2]Ast.Node.Index = undefined;
+    for (stmts) |stmt| {
+        const var_decl = tree.fullVarDecl(stmt) orelse continue;
+        const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+        const path_expr = pathExprOfCreateModule(tree, init_node, &call_buf, &struct_buf) orelse continue;
+        if (tree.nodeTag(path_expr) != .identifier) continue;
+
+        const module_var = tree.tokenSlice(var_decl.ast.mut_token + 1);
+        const kind = rootKindAtModule(tree, stmts, module_var) orelse return null;
+        const param = tree.tokenSlice(tree.nodeMainToken(path_expr));
+        const index = paramIndexNamed(tree, proto, param) orelse return null;
+        return .{ .index = index, .kind = kind };
+    }
+    return null;
+}
+
+/// Phase 32: the same idea one level out — `for (platform_test_files) |pt| {
+/// const m = b.createModule(.{ .root_source_file = b.path(pt.path) }); ...
+/// b.addTest(.{ .root_module = m }); }`. The table is a comptime literal in
+/// the same file, so every path it names can be read straight off the array
+/// literal; the loop body only says which field (or tuple slot) of an
+/// element holds it. Appends one root per element.
+fn scanRootTableLoop(gpa: Allocator, tree: *const Ast, result: *BuildGraph, for_full: Ast.full.For) !void {
+    if (for_full.ast.inputs.len == 0) return;
+    const table_node = for_full.ast.inputs[0];
+    if (tree.nodeTag(table_node) != .identifier) return;
+    const table_name = tree.tokenSlice(tree.nodeMainToken(table_node));
+
+    var capture_tok = for_full.payload_token;
+    if (tree.tokenTag(capture_tok) == .asterisk) capture_tok += 1;
+    const capture = tree.tokenSlice(capture_tok);
+
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, for_full.ast.then_expr) orelse return;
+
+    var call_buf: [1]Ast.Node.Index = undefined;
+    var struct_buf: [2]Ast.Node.Index = undefined;
+    for (stmts) |stmt| {
+        const var_decl = tree.fullVarDecl(stmt) orelse continue;
+        const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+        const path_expr = pathExprOfCreateModule(tree, init_node, &call_buf, &struct_buf) orelse continue;
+        const accessor = captureAccessor(tree, path_expr, capture) orelse continue;
+
+        const module_var = tree.tokenSlice(var_decl.ast.mut_token + 1);
+        const kind = rootKindAtModule(tree, stmts, module_var) orelse return;
+        try appendTableRoots(gpa, tree, result, table_name, accessor, kind);
+        return;
+    }
+}
+
+/// Reads every path `table_name`'s literal names through `accessor` and
+/// records it as a root of `kind`. A malformed element is skipped rather
+/// than failing the table: one entry zigroot can't read shouldn't cost the
+/// rest of the table its roots.
+fn appendTableRoots(
+    gpa: Allocator,
+    tree: *const Ast,
+    result: *BuildGraph,
+    table_name: []const u8,
+    accessor: PathAccessor,
+    kind: RootKind,
+) !void {
+    const table_init = findVarDeclInit(tree, table_name) orelse return;
+    var array_buf: [2]Ast.Node.Index = undefined;
+    const table = tree.fullArrayInit(&array_buf, table_init) orelse return;
+
+    for (table.ast.elements) |element| {
+        const tok = tableElementPath(tree, element, accessor) orelse continue;
+        const path = parseStringLiteral(gpa, tree, tok) catch continue;
+        errdefer gpa.free(path);
+        switch (kind) {
+            .test_root => try result.test_roots.append(gpa, path),
+            .exe_root => try result.exe_roots.append(gpa, path),
+        }
+    }
+}
+
+/// The string-literal token `accessor` selects out of one table element — a
+/// named field of a struct literal, or a slot of a tuple literal.
+fn tableElementPath(tree: *const Ast, element: Ast.Node.Index, accessor: PathAccessor) ?Ast.TokenIndex {
+    switch (accessor) {
+        .field => |name| {
+            var struct_buf: [2]Ast.Node.Index = undefined;
+            const struct_init = tree.fullStructInit(&struct_buf, element) orelse return null;
+            for (struct_init.ast.fields) |field_value| {
+                const name_tok = tree.firstToken(field_value) - 2;
+                if (!std.mem.eql(u8, tree.tokenSlice(name_tok), name)) continue;
+                if (tree.nodeTag(field_value) != .string_literal) return null;
+                return tree.nodeMainToken(field_value);
+            }
+            return null;
+        },
+        .index => |slot| {
+            var array_buf: [2]Ast.Node.Index = undefined;
+            const array_init = tree.fullArrayInit(&array_buf, element) orelse return null;
+            if (slot >= array_init.ast.elements.len) return null;
+            const chosen = array_init.ast.elements[slot];
+            if (tree.nodeTag(chosen) != .string_literal) return null;
+            return tree.nodeMainToken(chosen);
+        },
+    }
+}
+
+/// How `node` reads a path out of `capture`: `capture.field` or
+/// `capture[index]`. `null` when `node` isn't rooted at `capture` at all,
+/// which is how a loop that builds its paths some other way is left alone.
+fn captureAccessor(tree: *const Ast, node: Ast.Node.Index, capture: []const u8) ?PathAccessor {
+    switch (tree.nodeTag(node)) {
+        .field_access => {
+            const base, const name_tok = tree.nodeData(node).node_and_token;
+            if (!isIdentifierNamed(tree, base, capture)) return null;
+            return .{ .field = tree.tokenSlice(name_tok) };
+        },
+        .array_access => {
+            const base, const index_node = tree.nodeData(node).node_and_node;
+            if (!isIdentifierNamed(tree, base, capture)) return null;
+            if (tree.nodeTag(index_node) != .number_literal) return null;
+            const text = tree.tokenSlice(tree.nodeMainToken(index_node));
+            const slot = std.fmt.parseInt(u32, text, 10) catch return null;
+            return .{ .index = slot };
+        },
+        else => return null,
+    }
+}
+
+fn isIdentifierNamed(tree: *const Ast, node: Ast.Node.Index, name: []const u8) bool {
+    if (tree.nodeTag(node) != .identifier) return false;
+    return std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), name);
+}
+
+/// The expression `node` passes to `b.path(...)` for its `root_source_file`,
+/// for the `b.createModule(.{ .root_source_file = b.path(<expr>) })` shape —
+/// the same extraction as `rootSourceFileFromOptions`, except the path is
+/// named indirectly and left for the caller to resolve.
+fn pathExprOfCreateModule(
+    tree: *const Ast,
+    node: Ast.Node.Index,
+    call_buf: *[1]Ast.Node.Index,
+    struct_buf: *[2]Ast.Node.Index,
+) ?Ast.Node.Index {
+    const call = tree.fullCall(call_buf, node) orelse return null;
+    const field = fieldAccessName(tree, call.ast.fn_expr) orelse return null;
+    if (!std.mem.eql(u8, field, "createModule")) return null;
+    if (call.ast.params.len < 1) return null;
+
+    const struct_init = tree.fullStructInit(struct_buf, call.ast.params[0]) orelse return null;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_source_file")) continue;
+
+        var path_buf: [1]Ast.Node.Index = undefined;
+        const path_call = tree.fullCall(&path_buf, field_value) orelse return null;
+        const path_field = fieldAccessName(tree, path_call.ast.fn_expr) orelse return null;
+        if (!std.mem.eql(u8, path_field, "path")) return null;
+        if (path_call.ast.params.len < 1) return null;
+        return path_call.ast.params[0];
+    }
+    return null;
+}
+
+/// What `stmts` builds out of the module bound to `module_var`: a test, an
+/// executable, or nothing. Without this check a parameter would be read as
+/// a root on the strength of a `createModule` alone, and a module built to
+/// be imported rather than compiled would be miscounted.
+fn rootKindAtModule(tree: *const Ast, stmts: []const Ast.Node.Index, module_var: []const u8) ?RootKind {
+    var call_buf: [1]Ast.Node.Index = undefined;
+    var struct_buf: [2]Ast.Node.Index = undefined;
+    for (stmts) |stmt| {
+        var expr = stmt;
+        if (tree.fullVarDecl(stmt)) |var_decl| {
+            expr = var_decl.ast.init_node.unwrap() orelse continue;
+        }
+        const call = tree.fullCall(&call_buf, expr) orelse continue;
+        const field = fieldAccessName(tree, call.ast.fn_expr) orelse continue;
+
+        const kind: RootKind = if (std.mem.eql(u8, field, "addTest"))
+            .test_root
+        else if (std.mem.eql(u8, field, "addExecutable") or std.mem.eql(u8, field, "addLibrary"))
+            .exe_root
+        else
+            continue;
+
+        if (call.ast.params.len < 1) continue;
+        if (rootModuleIsNamed(tree, call.ast.params[0], &struct_buf, module_var)) return kind;
+    }
+    return null;
+}
+
+/// Whether `options`, an `addTest`/`addExecutable` argument struct, roots
+/// itself at the module bound to `module_var`.
+fn rootModuleIsNamed(
+    tree: *const Ast,
+    options: Ast.Node.Index,
+    struct_buf: *[2]Ast.Node.Index,
+    module_var: []const u8,
+) bool {
+    const struct_init = tree.fullStructInit(struct_buf, options) orelse return false;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "root_module")) continue;
+        return isIdentifierNamed(tree, field_value, module_var);
+    }
+    return false;
+}
+
+/// The initializer of a `const <name> = ...` declaration anywhere in `tree`.
+fn findVarDeclInit(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
+    var i: u32 = 0;
+    while (i < tree.nodes.len) : (i += 1) {
+        const node: Ast.Node.Index = @enumFromInt(i);
+        const var_decl = tree.fullVarDecl(node) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(var_decl.ast.mut_token + 1), name)) continue;
+        return var_decl.ast.init_node.unwrap();
     }
     return null;
 }

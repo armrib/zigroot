@@ -431,6 +431,181 @@ test "records a b.addTest with an inline root_module createModule as a test root
     try t.expectEqualStrings("src/tests/test_http.zig", graph.test_roots.items[0]);
 }
 
+test "resolves a module struct bound below the helper that reads it" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const Shared = struct { mph: *std.Build.Module };
+        \\fn wireExe(b: *std.Build, shared: Shared) void {
+        \\    const exe_mod = b.createModule(.{ .root_source_file = b.path("apps/staticd/src/main.zig") });
+        \\    exe_mod.addImport("mph", shared.mph);
+        \\    b.installArtifact(b.addExecutable(.{ .name = "staticd", .root_module = exe_mod }));
+        \\}
+        \\fn wireShared(b: *std.Build) Shared {
+        \\    const mph_mod = b.createModule(.{ .root_source_file = b.path("apps/staticd/src/mph.zig") });
+        \\    return .{ .mph = mph_mod };
+        \\}
+        \\pub fn build(b: *std.Build) void {
+        \\    const shared = wireShared(b);
+        \\    wireExe(b, shared);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    const paths = graph.resolve("mph") orelse return error.MphModuleMissing;
+    try t.expectEqual(@as(usize, 1), paths.len);
+    try t.expectEqualStrings("apps/staticd/src/mph.zig", paths[0]);
+}
+
+test "sibling blocks reusing one variable name keep their own test roots" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    {
+        \\        const m = b.createModule(.{ .root_source_file = b.path("perf/one.zig") });
+        \\        _ = b.addTest(.{ .root_module = m });
+        \\    }
+        \\    {
+        \\        const m = b.createModule(.{ .root_source_file = b.path("perf/two.zig") });
+        \\        _ = b.addTest(.{ .root_module = m });
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 2), graph.test_roots.items.len);
+    try t.expectEqualStrings("perf/one.zig", graph.test_roots.items[0]);
+    try t.expectEqualStrings("perf/two.zig", graph.test_roots.items[1]);
+}
+
+test "records every test root named by a table a for loop walks by field" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const PlatformTest = struct { path: []const u8, step_name: ?[]const u8 = null };
+        \\const platform_test_files = [_]PlatformTest{
+        \\    .{ .path = "platform/nftables/nftables_test.zig" },
+        \\    .{ .path = "platform/rootfs/mount_test.zig", .step_name = "rootfs_mount" },
+        \\};
+        \\pub fn build(b: *std.Build) void {
+        \\    inline for (platform_test_files) |pt| {
+        \\        const m = b.createModule(.{ .root_source_file = b.path(pt.path) });
+        \\        const t = b.addTest(.{ .root_module = m });
+        \\        b.getInstallStep().dependOn(&b.addRunArtifact(t).step);
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 2), graph.test_roots.items.len);
+    try t.expectEqualStrings("platform/nftables/nftables_test.zig", graph.test_roots.items[0]);
+    try t.expectEqualStrings("platform/rootfs/mount_test.zig", graph.test_roots.items[1]);
+}
+
+test "records every test root named by a tuple table a for loop walks by index" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const configs = .{
+        \\        .{ "test_mph", "apps/staticd/src/tests/test_mph.zig" },
+        \\        .{ "test_http", "apps/staticd/src/tests/test_http.zig" },
+        \\    };
+        \\    inline for (configs) |tc| {
+        \\        const test_mod = b.createModule(.{ .root_source_file = b.path(tc[1]) });
+        \\        const t = b.addTest(.{ .name = tc[0], .root_module = test_mod });
+        \\        b.getInstallStep().dependOn(&b.addRunArtifact(t).step);
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 2), graph.test_roots.items.len);
+    try t.expectEqualStrings("apps/staticd/src/tests/test_mph.zig", graph.test_roots.items[0]);
+    try t.expectEqualStrings("apps/staticd/src/tests/test_http.zig", graph.test_roots.items[1]);
+}
+
+test "records exe roots named by a table a for loop walks" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const Bench = struct { step_name: []const u8, root_source_file: []const u8 };
+        \\const BENCHES = [_]Bench{
+        \\    .{ .step_name = "bench-iam-rights", .root_source_file = "apps/iamd/src/bench/bench_rights.zig" },
+        \\};
+        \\pub fn build(b: *std.Build) void {
+        \\    for (BENCHES) |bench| {
+        \\        const mod = b.createModule(.{ .root_source_file = b.path(bench.root_source_file) });
+        \\        const exe = b.addExecutable(.{ .name = bench.step_name, .root_module = mod });
+        \\        b.installArtifact(exe);
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 0), graph.test_roots.items.len);
+    try t.expectEqual(@as(usize, 1), graph.exe_roots.items.len);
+    try t.expectEqualStrings("apps/iamd/src/bench/bench_rights.zig", graph.exe_roots.items[0]);
+}
+
+test "a for loop that builds a module without compiling it names no root" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\const libs = [_][]const u8{ "libs/a.zig", "libs/b.zig" };
+        \\pub fn build(b: *std.Build) void {
+        \\    for (libs) |lib| {
+        \\        const m = b.createModule(.{ .root_source_file = b.path(lib.path) });
+        \\        _ = m;
+        \\    }
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 0), graph.test_roots.items.len);
+    try t.expectEqual(@as(usize, 0), graph.exe_roots.items.len);
+}
+
+test "records a test root passed as a string argument to a local addTest helper" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    addModuleTest(b, "domains/agent/supervision_test.zig");
+        \\    addModuleTest(b, "domains/agent/ports_test.zig");
+        \\}
+        \\fn addModuleTest(b: *std.Build, path: []const u8) void {
+        \\    const m = b.createModule(.{ .root_source_file = b.path(path) });
+        \\    const t = b.addTest(.{ .root_module = m });
+        \\    b.getInstallStep().dependOn(&b.addRunArtifact(t).step);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 2), graph.test_roots.items.len);
+    try t.expectEqualStrings("domains/agent/supervision_test.zig", graph.test_roots.items[0]);
+    try t.expectEqualStrings("domains/agent/ports_test.zig", graph.test_roots.items[1]);
+}
+
+test "a local helper that builds a module without a test is not a test root" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const m = moduleAt(b, "src/lib.zig");
+        \\    _ = m;
+        \\}
+        \\fn moduleAt(b: *std.Build, path: []const u8) *std.Build.Module {
+        \\    const m = b.createModule(.{ .root_source_file = b.path(path) });
+        \\    return m;
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 0), graph.test_roots.items.len);
+}
+
 test "records a b.addTest using the older root_source_file shape as a test root" {
     var graph = try parse(
         \\const std = @import("std");

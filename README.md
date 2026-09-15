@@ -132,6 +132,23 @@ Status: Phase 0-16. Implemented so far:
 - `.?` unwraps (Phase 31) are stepped over inside a chain rather than ending
   it: `self.spoa.?.onRecv()` resolves against the optional's payload type, the
   same as the `if (self.spoa) |s| s.onRecv()` capture already did.
+- `build.zig` helpers that take the path (Phase 32): a test registered as
+  `addModuleTest(b, opts, "domains/agent/supervision_test.zig", ...)` — a
+  local helper whose body does `b.createModule(.{ .root_source_file =
+  b.path(path) })` and then `b.addTest(.{ .root_module = m })` — is now a
+  root. The path is a literal at the call site, so only the hop from
+  argument position to parameter name is needed, no evaluation.
+- `build.zig` tables walked by a `for` loop (Phase 32): the same shape one
+  level out, `for (platform_test_files) |pt| { ... b.path(pt.path) ... }`,
+  including tuple tables read by index (`b.path(tc[1])`). Every path the
+  table literal names becomes a root of whatever the loop body builds —
+  `addTest` or `addExecutable`/`addLibrary`.
+- Bindings are collected in their own pass (Phase 32) before anything that
+  reads one, so a stratified `build.zig` that declares `wireExe` — which
+  says `addImport("mph", shared.mph)` — above the `wire()` that binds
+  `const shared = wireShared(...)` no longer drops the module. Bindings are
+  still rebuilt in source order during the main pass, so sibling blocks
+  reusing one variable name each keep their own module.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
