@@ -201,6 +201,13 @@ Status: Phase 0-16. Implemented so far:
   `test { ... }` block has no owning declaration to hang an edge on, so it
   is anchored at the file's own root symbol — which a production walk can
   never reach, since nothing outside test code imports the file at all.
+- Members of an inline anonymous struct (Phase 39): `std.mem.sort(T, xs,
+  {}, struct { fn lessThan(...) ... }.lessThan)`. The struct is never named,
+  so there is no binding whose references could be walked, and ZLint never
+  pushes an anonymous `struct { ... }` as a container of its own, so the
+  `.lessThan` hop had nothing to resolve against — the one mention of the
+  name in the whole project. The field name is now matched against the
+  literal's own member list, edging the enclosing declaration to it.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

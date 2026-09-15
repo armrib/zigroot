@@ -170,6 +170,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     try buildStuckFieldChains(gpa, &graph, project);
     try buildDeclLiterals(gpa, &graph, project);
     try buildAliasEdges(gpa, &graph, project);
+    try buildAnonymousContainerMembers(gpa, &graph, project);
 
     return graph;
 }
@@ -181,6 +182,19 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
 /// bindings included, so a file used as a namespace also reaches its
 /// root (and, through `SymbolGraph`'s container→field edges, the types its
 /// top-level fields are declared with).
+fn buildAliasEdges(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        var sym_it = file.semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            if (FieldChain.valueAliasInit(&file.semantic, sym_id, .{ .allow_call = true }) == null) continue;
+            const alias: SymbolId = .{ .file = file.id, .local = sym_id };
+            const target = resolveAlias(project, alias) orelse continue;
+            if (target.eql(alias)) continue;
+            try graph.addEdge(gpa, alias, target, file.semantic.symbols.get(sym_id).decl, .definite);
+        }
+    }
+}
+
 /// Phase 38: the declaration a reference at `node` belongs to. A reference
 /// written straight inside a container-level `test { ... }` block has none —
 /// which is the whole point, since test code doesn't count as use. In a
@@ -194,15 +208,44 @@ fn ownerOf(file: *const File, node: Semantic.Ast.Node.Index) ?Semantic.Symbol.Id
     return null;
 }
 
-fn buildAliasEdges(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+/// The symbol whose own declaration node is `node`. `OwnerMap` answers the
+/// other question — which declaration *contains* a node — so it can't be used
+/// to walk from a container's member list to the members themselves.
+fn symbolDeclaredAt(semantic: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Symbol.Id {
+    var it = semantic.symbols.iter();
+    while (it.next()) |sym_id| {
+        if (semantic.symbols.get(sym_id).decl == node) return sym_id;
+    }
+    return null;
+}
+
+/// Phase 39: `std.mem.sort(T, xs, {}, struct { fn lessThan(...) ... }.lessThan)`
+/// — a comparator written inline as a member of an anonymous struct. The
+/// struct is never named, so no binding exists whose references could be
+/// walked, and ZLint never pushes an anonymous `struct { ... }` as a
+/// container of its own, so `FieldChain` has nothing to resolve the hop
+/// against either. The only mention of `lessThan` anywhere in the project is
+/// this one field access. Match the field name against the literal's own
+/// member list and edge the enclosing declaration straight to it.
+fn buildAnonymousContainerMembers(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
     for (project.files.items) |file| {
-        var sym_it = file.semantic.symbols.iter();
-        while (sym_it.next()) |sym_id| {
-            if (FieldChain.valueAliasInit(&file.semantic, sym_id, .{ .allow_call = true }) == null) continue;
-            const alias: SymbolId = .{ .file = file.id, .local = sym_id };
-            const target = resolveAlias(project, alias) orelse continue;
-            if (target.eql(alias)) continue;
-            try graph.addEdge(gpa, alias, target, file.semantic.symbols.get(sym_id).decl, .definite);
+        const ast = &file.semantic.parse.ast;
+        for (0..ast.nodes.len) |raw| {
+            const node: Semantic.Ast.Node.Index = @enumFromInt(raw);
+            if (ast.nodeTag(node) != .field_access) continue;
+
+            const data = ast.nodeData(node).node_and_token;
+            var buf: [2]Semantic.Ast.Node.Index = undefined;
+            const container = ast.fullContainerDecl(&buf, data[0]) orelse continue;
+            const owner = ownerOf(&file, node) orelse continue;
+            const wanted = file.semantic.tokenSlice(data[1]);
+
+            for (container.ast.members) |member| {
+                const member_sym = symbolDeclaredAt(&file.semantic, member) orelse continue;
+                const id: SymbolId = .{ .file = file.id, .local = member_sym };
+                if (!std.mem.eql(u8, project.symbol(id).name, wanted)) continue;
+                try graph.addEdge(gpa, .{ .file = file.id, .local = owner }, id, node, .definite);
+            }
         }
     }
 }

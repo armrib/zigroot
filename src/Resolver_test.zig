@@ -1618,3 +1618,45 @@ test "a for-payload method call resolves when the struct is declared in another 
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a member of an inline anonymous struct literal is not reported dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\pub fn main() void {
+        \\    apply(struct {
+        \\        fn lessThan(a: u32, b: u32) bool {
+        \\            return a < b;
+        \\        }
+        \\    }.lessThan);
+        \\}
+        \\
+        \\fn apply(f: *const fn (u32, u32) bool) void {
+        \\    _ = f(1, 2);
+        \\}
+        \\
+        \\fn unusedOne() void {}
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}
