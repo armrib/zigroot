@@ -237,6 +237,13 @@ Status: Phase 0-16. Implemented so far:
   address-of chain is marked as landing on the element type itself rather
   than on a declaration whose type still has to be read.
 
+- An anonymous struct as a return type (Phase 43): `pool.acquire()` returning
+  `?struct { id: u16, worker: *Worker }` has no symbol to hand back as the
+  variable's type, so every hop off it went unresolved — taking the whole
+  `Worker` method set with it. The hop's field name is matched against the
+  return type's own member list, and the walk resumes from that member's
+  declared type.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

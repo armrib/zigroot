@@ -1721,3 +1721,65 @@ test "an &container.array[i] element method resolves when the struct is declared
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "a member of an anonymous struct return type resolves across a file boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const pool_mod = @import("pool.zig");
+        \\
+        \\const Holder = struct {
+        \\    pool: pool_mod.Pool = .{},
+        \\    pub fn run(self: *Holder) void {
+        \\        const acquired = self.pool.acquire() orelse return;
+        \\        acquired.worker.stage();
+        \\    }
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var h: Holder = .{};
+        \\    h.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "pool.zig",
+        \\pub const Worker = struct {
+        \\    n: u32 = 0,
+        \\    pub fn stage(self: *Worker) void {
+        \\        self.n += 1;
+        \\    }
+        \\    pub fn unusedOne(self: *Worker) void {
+        \\        self.n += 2;
+        \\    }
+        \\};
+        \\
+        \\pub const Pool = struct {
+        \\    workers: [2]Worker = .{ .{}, .{} },
+        \\    pub fn acquire(self: *Pool) ?struct { id: u16, worker: *Worker } {
+        \\        return .{ .id = 0, .worker = &self.workers[0] };
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

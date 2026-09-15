@@ -172,6 +172,7 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
     try buildAliasEdges(gpa, &graph, project);
     try buildAnonymousContainerMembers(gpa, &graph, project);
     try buildDuckTypedArguments(gpa, &graph, project);
+    try buildAnonymousReturnMembers(gpa, &graph, project);
 
     return graph;
 }
@@ -218,6 +219,79 @@ fn symbolDeclaredAt(semantic: *const Semantic, node: Semantic.Ast.Node.Index) ?S
         if (semantic.symbols.get(sym_id).decl == node) return sym_id;
     }
     return null;
+}
+
+/// Phase 43: `const acquired = pool.acquire() orelse return;
+/// acquired.worker.stageVerifyRequest(...)`, where `acquire` returns
+/// `?struct { id: u16, worker: *ArgonWorker }`. The return type is an
+/// anonymous container, so there is no symbol to hand back as `acquired`'s
+/// type and every hop off it goes unresolved — taking the whole
+/// `ArgonWorker` method set with it. Match the hop's field name against the
+/// return type's own member list (as Phase 39 does for a literal written
+/// inline), then resume the walk from that member's declared type.
+fn buildAnonymousReturnMembers(gpa: Allocator, graph: *SymbolGraph, project: *const Project) Allocator.Error!void {
+    for (project.files.items) |file| {
+        const semantic = &file.semantic;
+        const ast = &semantic.parse.ast;
+
+        var sym_it = semantic.symbols.iter();
+        while (sym_it.next()) |sym_id| {
+            const ret = anonymousReturnType(project, file.id, sym_id) orelse continue;
+            const ret_semantic = &project.file(ret.file).semantic;
+
+            // Re-read the members here: `fullContainerDecl` writes a
+            // two-member list into the buffer it is handed, so a slice
+            // returned across a function boundary would dangle.
+            var buf: [2]Ast.Node.Index = undefined;
+            const container = ret_semantic.parse.ast.fullContainerDecl(&buf, ret.node) orelse continue;
+
+            var ref_it = semantic.symbols.iterReferences(sym_id);
+            while (ref_it.next()) |ref| {
+                const owner = ownerOf(&file, ref.node) orelse continue;
+                const owner_id: SymbolId = .{ .file = file.id, .local = owner };
+
+                const hop_node = semantic.node_links.getParent(ref.node) orelse continue;
+                if (ast.nodeTag(hop_node) != .field_access) continue;
+                const wanted = semantic.tokenSlice(ast.nodeData(hop_node).node_and_token[1]);
+
+                for (container.ast.members) |member| {
+                    const member_sym = symbolDeclaredAt(ret_semantic, member) orelse continue;
+                    const member_id: SymbolId = .{ .file = ret.file, .local = member_sym };
+                    if (!std.mem.eql(u8, project.symbol(member_id).name, wanted)) continue;
+
+                    try graph.addEdge(gpa, owner_id, member_id, hop_node, .definite);
+
+                    const ty = declaredType(project, member_id) orelse continue;
+                    const ty_file = project.file(ty.file);
+                    try graph.addEdge(gpa, owner_id, ty, hop_node, .possible);
+                    try addChain(project, graph, gpa, owner_id, ty.file, semantic, &ty_file.semantic, &ty_file.owner_map, ty.local, hop_node, .possible);
+                }
+            }
+        }
+    }
+}
+
+const AnonymousReturn = struct {
+    /// The file the callee — and so the type node — lives in, which is not
+    /// `sym_id`'s file whenever the call crossed an `@import`.
+    file: FileId,
+    node: Ast.Node.Index,
+};
+
+/// The anonymous container `sym_id`'s call initializer returns, if that is
+/// what its callee's declared return type is. `null` whenever the type has
+/// a name — every other case already resolves.
+fn anonymousReturnType(project: *const Project, file_id: FileId, sym_id: Semantic.Symbol.Id) ?AnonymousReturn {
+    const semantic = &project.file(file_id).semantic;
+    const fn_expr = InstanceType.callInit(semantic, sym_id) orelse return null;
+    const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return null;
+
+    const fn_semantic = &project.file(fn_sym.file).semantic;
+    const return_node = InstanceType.fnReturnTypeNode(fn_semantic, fn_sym.local) orelse return null;
+
+    var buf: [2]Ast.Node.Index = undefined;
+    if (fn_semantic.parse.ast.fullContainerDecl(&buf, return_node) == null) return null;
+    return .{ .file = fn_sym.file, .node = return_node };
 }
 
 /// Phase 40: `pwriteFull(FdWriter{ .fd = fd }, bytes, offset)`, where
