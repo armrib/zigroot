@@ -1165,7 +1165,9 @@ pub fn chainTargets(
             try out.append(gpa, .{ .file = cur.file, .local = target });
         };
 
-        const step = chainStep(project, ast, cur.file, &chain, 0) orelse return;
+        const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
+        const step = chainStep(project, ast, cur.file, &chain, 0) orelse
+            unconsumedHop(project, ast, cur, landed, &chain, 0) orelse return;
         try out.append(gpa, step.next);
         cur = step.next;
         node = step.node;
