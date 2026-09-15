@@ -2156,3 +2156,63 @@ test "a for loop over a std list's items resolves the element type" {
 
     try t.expectEqual(@as(usize, 0), dead.items.len);
 }
+
+test "a method on an anonymous union payload type resolves across a file boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const request = @import("request.zig");
+        \\
+        \\pub fn handle(req: *const request.Request) []const u8 {
+        \\    return req.body.memory.slice();
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    var r: request.Request = .{ .body = .{ .memory = .{ .buf = undefined, .len = 0 } } };
+        \\    _ = handle(&r);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "request.zig",
+        \\pub const Body = union(enum) {
+        \\    none,
+        \\    memory: struct {
+        \\        buf: [8]u8,
+        \\        len: usize,
+        \\
+        \\        pub fn slice(self: *const @This()) []const u8 {
+        \\            return self.buf[0..self.len];
+        \\        }
+        \\        pub fn unusedOne(self: *const @This()) usize {
+        \\            return self.len;
+        \\        }
+        \\    },
+        \\};
+        \\
+        \\pub const Request = struct {
+        \\    body: Body = .none,
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

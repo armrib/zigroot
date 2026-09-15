@@ -300,6 +300,12 @@ Status: Phase 0-16. Implemented so far:
   name whose meaning is fixed across std's list types — and the argument is
   followed through the local alias it is usually spelled with.
 
+- A hop off an anonymous type written inline (Phase 53): `body: union(enum) {
+  memory: struct { ..., pub fn slice(...) } }`, reached as
+  `req.body.memory.slice()`. There is no symbol standing for that type, so the
+  hop is matched against its member list directly — the same trick Phase 43
+  uses for an anonymous return type.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

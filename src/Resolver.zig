@@ -1172,6 +1172,29 @@ fn genericElement(project: *const Project, ast: *const Semantic, base: SymbolId,
     return null;
 }
 
+/// Phase 53: the member named by the `.field` hop at `node` (a node in
+/// `ast`), when `base`'s own declared type is an anonymous container spelled
+/// inline — `body: union(enum) { memory: struct { buf: [N]u8, len: usize,
+/// pub fn slice(...) ... } }`. There is no symbol standing for that type, so
+/// the hop is matched against its member list directly, the way Phase 43
+/// matches an anonymous return type's.
+fn anonymousTypeMember(project: *const Project, ast: *const Semantic, base: SymbolId, node: Semantic.Ast.Node.Index) ?SymbolId {
+    const field = FieldChain.fieldAccessName(ast, node) orelse return null;
+
+    const semantic = &project.file(base.file).semantic;
+    const base_ast = &semantic.parse.ast;
+    for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
+        var buf: [2]Ast.Node.Index = undefined;
+        const container = base_ast.fullContainerDecl(&buf, type_node) orelse continue;
+        for (container.ast.members) |member| {
+            const member_sym = symbolDeclaredAt(semantic, member) orelse continue;
+            const member_id: SymbolId = .{ .file = base.file, .local = member_sym };
+            if (std.mem.eql(u8, project.symbol(member_id).name, field)) return member_id;
+        }
+    }
+    return null;
+}
+
 /// Follows `resolveAlias` to the end, bounded like every other hop loop.
 fn aliasTarget(project: *const Project, start: SymbolId) SymbolId {
     var cur = start;
@@ -1281,7 +1304,24 @@ fn addChain(
         }
 
         if (chain.stuck) |stuck| {
-            const ty = declaredType(project, .{ .file = cur_file, .local = stuck.symbol }) orelse break;
+            const stuck_id: SymbolId = .{ .file = cur_file, .local = stuck.symbol };
+            const ty = declaredType(project, stuck_id) orelse {
+                // Phase 53: the hop's container is an anonymous type written
+                // inline (`memory: struct { ..., pub fn slice(...) }`), which
+                // has no symbol to resolve to. Match the hop's name against
+                // its members, then resume past the hop.
+                const member = anonymousTypeMember(project, ast, stuck_id, stuck.node) orelse break;
+                const member_file = project.file(member.file);
+                const past_hop = ast.node_links.getParent(stuck.node) orelse break;
+
+                try graph.addEdge(gpa, owner_id, member, start_node, .definite);
+
+                cur_file = member.file;
+                cur_symbols = &member_file.semantic;
+                cur_owner_map = &member_file.owner_map;
+                chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, member.local, past_hop, .possible);
+                continue;
+            };
             const next_file = project.file(ty.file);
 
             try graph.addEdge(gpa, owner_id, ty, start_node, .possible);
