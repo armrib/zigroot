@@ -253,6 +253,14 @@ Status: Phase 0-16. Implemented so far:
   payload whose condition is a *call* rather than a chain had no type at all —
   the callee's return type is now resolved for that shape too.
 
+- What a possibly-reached symbol uses (Phase 46): only the direct target of an
+  `.unknown` edge used to be marked possibly reached, so anything that target
+  alone used came out dead-for-certain. `Log.FdWriter.write` is named only
+  through an `anytype` parameter; the error set and errno classifier nothing
+  else calls were reported as real findings. Possible reachability now
+  propagates, following every edge kind — past that first guess there is
+  nothing left to hedge.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

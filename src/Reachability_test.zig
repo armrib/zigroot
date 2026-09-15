@@ -731,3 +731,45 @@ test "a decl literal (.init(...) / return .empty / field default) reaches the me
         try t.expect(std.mem.eql(u8, name, "other") or std.mem.eql(u8, name, "unusedInit"));
     }
 }
+
+test "what a possibly-reached symbol uses is possibly reached, not dead" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const Foo = struct {
+        \\    pub fn bar() void {
+        \\        helper();
+        \\    }
+        \\};
+        \\pub fn main() void {
+        \\    const name = getName();
+        \\    @field(Foo, name)();
+        \\}
+        \\fn helper() void {}
+        \\fn getName() []const u8 { return "bar"; }
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    const file_id = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const semantic = &project.file(file_id).semantic;
+    const helper = semantic.symbols.getSymbolNamed("helper").?;
+
+    try t.expect(!reachability.isReachable(.{ .file = file_id, .local = helper }));
+    try t.expect(reachability.isPossiblyReachable(.{ .file = file_id, .local = helper }));
+}

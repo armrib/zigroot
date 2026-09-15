@@ -87,8 +87,51 @@ pub fn build(gpa: Allocator, project: *const Project, roots: *const Roots, cross
         try reachability.collectUnknown(gpa, &f.symbol_graph);
     }
     try reachability.collectUnknown(gpa, cross_file);
+    try reachability.spreadPossible(gpa, project, cross_file);
 
     return reachability;
+}
+
+/// Phase 46: what a possibly-reached symbol itself uses is possibly reached
+/// too. `Log.FdWriter.write` is only ever named through an `anytype`
+/// parameter, so it lands in `possibly_reached`; the error set and the errno
+/// classifier nothing else calls would otherwise be reported dead-for-certain
+/// — a wrong answer in the one list a user is asked to act on. Every edge
+/// kind is followed here, `.unknown` included: past this point the whole
+/// walk is already a guess, so there is nothing left to hedge.
+fn spreadPossible(self: *Reachability, gpa: Allocator, project: *const Project, cross_file: *const SymbolGraph) Allocator.Error!void {
+    var queue: std.ArrayListUnmanaged(SymbolId) = .empty;
+    defer queue.deinit(gpa);
+
+    var seed_it = self.possibly_reached.keyIterator();
+    while (seed_it.next()) |id| {
+        try queue.append(gpa, id.*);
+    }
+
+    var cursor: usize = 0;
+    while (cursor < queue.items.len) : (cursor += 1) {
+        const current = queue.items[cursor];
+        const graph = &project.file(current.file).symbol_graph;
+        try self.spreadTo(gpa, graph.outgoing(current), &queue);
+        try self.spreadTo(gpa, cross_file.outgoing(current), &queue);
+    }
+}
+
+/// Marks every unreached target in `targets` possibly reached, queueing the
+/// ones that were not already. A symbol `reached` outright is left alone —
+/// certain beats possible.
+fn spreadTo(
+    self: *Reachability,
+    gpa: Allocator,
+    targets: []const SymbolGraph.Target,
+    queue: *std.ArrayListUnmanaged(SymbolId),
+) Allocator.Error!void {
+    for (targets) |target| {
+        if (self.reached.contains(target.to)) continue;
+        const entry = try self.possibly_reached.getOrPut(gpa, target.to);
+        if (entry.found_existing) continue;
+        try queue.append(gpa, target.to);
+    }
 }
 
 fn collectUnknown(self: *Reachability, gpa: Allocator, graph: *const SymbolGraph) Allocator.Error!void {
