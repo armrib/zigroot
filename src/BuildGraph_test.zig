@@ -890,6 +890,66 @@ test "parseInto resolves a module/path forwarded through an Options struct into 
     try t.expectEqualStrings("src/dep.zig", paths[0]);
 }
 
+test "parseInto resolves a module per element of a table forwarded into a cross-file helper" {
+    const StubResolver = struct {
+        fn resolve(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]u8 {
+            _ = context;
+            _ = gpa;
+            _ = rel_import_path;
+            _ = fn_name;
+            return null;
+        }
+
+        fn paramRequirements(context: *anyopaque, gpa: std.mem.Allocator, rel_import_path: []const u8, fn_name: []const u8) !?[]BuildGraph.ParamRequirement {
+            _ = context;
+            try t.expectEqualStrings("build/codegen.zig", rel_import_path);
+            try t.expectEqualStrings("addCodegen", fn_name);
+            const out = try gpa.alloc(BuildGraph.ParamRequirement, 1);
+            out[0] = .{
+                .import_name = try gpa.dupe(u8, "routes"),
+                .param_field = try gpa.dupe(u8, "routes_src"),
+            };
+            return out;
+        }
+    };
+    var dummy_ctx: u8 = 0;
+    const resolver: BuildGraph.HelperResolver = .{
+        .context = &dummy_ctx,
+        .resolveFn = StubResolver.resolve,
+        .paramRequirementsFn = StubResolver.paramRequirements,
+    };
+
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (file_imports.items) |p| t.allocator.free(p);
+        file_imports.deinit(t.allocator);
+    }
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\const codegen_factory = @import("build/codegen.zig");
+        \\const CODEGEN_FRONTENDS = [_]codegen_factory.CodegenOptions{
+        \\    .{ .name = "dashboard", .routes_src = "apps/clusterd/src/tools/codegen_routes.zig" },
+        \\    .{ .name = "iam", .routes_src = "apps/iamd/src/tools/codegen_routes.zig" },
+        \\};
+        \\pub fn build(b: *std.Build) void {
+        \\    for (CODEGEN_FRONTENDS) |fe| {
+        \\        const cg = codegen_factory.addCodegen(b, fe);
+        \\        b.getInstallStep().dependOn(&cg.run.step);
+        \\    }
+        \\}
+        \\
+    , &file_imports, resolver);
+
+    const paths = graph.resolve("routes") orelse return error.RoutesModuleMissing;
+    try t.expectEqual(@as(usize, 2), paths.len);
+    try t.expectEqualStrings("apps/clusterd/src/tools/codegen_routes.zig", paths[0]);
+    try t.expectEqualStrings("apps/iamd/src/tools/codegen_routes.zig", paths[1]);
+}
+
 test "b.addModule counts as a library, and a b.dependency-backed addImport name is external" {
     var graph: BuildGraph = .empty;
     defer graph.deinit(t.allocator);

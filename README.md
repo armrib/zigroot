@@ -149,6 +149,13 @@ Status: Phase 0-16. Implemented so far:
   `const shared = wireShared(...)` no longer drops the module. Bindings are
   still rebuilt in source order during the main pass, so sibling blocks
   reusing one variable name each keep their own module.
+- Option tables forwarded into a cross-file helper (Phase 33): `for
+  (CODEGEN_FRONTENDS) |fe| { codegen.addCodegen(b, ..., fe); }`, where the
+  helper roots a module at `b.path(opts.routes_src)` and names it. The
+  inline form (`wire(b, .{ .routes_src = "..." })`) already resolved; the
+  table form only needed to know which struct the loop capture stands for,
+  and the table literal answers that for every iteration at once. Each
+  element contributes its own candidate for the module name.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

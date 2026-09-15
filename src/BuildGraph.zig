@@ -246,6 +246,7 @@ pub fn parseInto(
 
         if (tree.fullFor(node)) |for_full| {
             try scanRootTableLoop(gpa, &tree, result, for_full);
+            try scanTableForwardedModules(gpa, &tree, result, for_full, resolver, &import_aliases);
             continue;
         }
 
@@ -1024,6 +1025,96 @@ fn scanRootTableLoop(gpa: Allocator, tree: *const Ast, result: *BuildGraph, for_
         const kind = rootKindAtModule(tree, stmts, module_var) orelse return;
         try appendTableRoots(gpa, tree, result, table_name, accessor, kind);
         return;
+    }
+}
+
+/// Phase 33: `for (CODEGEN_FRONTENDS) |fe| { codegen.addCodegen(b, ..., fe); }`
+/// — a table of option structs forwarded one element at a time to a helper
+/// in another file, which roots a module at `b.path(opts.<field>)` and gives
+/// it a name. `resolveParamForwardingCall` already closes this loop when the
+/// options are written inline at the call site (`wire(b, .{ .routes_src =
+/// "..." })`); the only thing missing for the table form is knowing which
+/// struct the capture stands for, and the table literal says that for every
+/// iteration at once. Without it a routes file reachable *only* as a named
+/// module — clusterd's is also imported by path, iamd's isn't — is an orphan.
+fn scanTableForwardedModules(
+    gpa: Allocator,
+    tree: *const Ast,
+    result: *BuildGraph,
+    for_full: Ast.full.For,
+    resolver: ?HelperResolver,
+    import_aliases: *const std.StringHashMapUnmanaged(Ast.TokenIndex),
+) !void {
+    const r = resolver orelse return;
+    if (for_full.ast.inputs.len == 0) return;
+    const table_node = for_full.ast.inputs[0];
+    if (tree.nodeTag(table_node) != .identifier) return;
+    const table_name = tree.tokenSlice(tree.nodeMainToken(table_node));
+
+    var capture_tok = for_full.payload_token;
+    if (tree.tokenTag(capture_tok) == .asterisk) capture_tok += 1;
+    const capture = tree.tokenSlice(capture_tok);
+
+    var stmt_buf: [2]Ast.Node.Index = undefined;
+    const stmts = tree.blockStatements(&stmt_buf, for_full.ast.then_expr) orelse return;
+
+    var call_buf: [1]Ast.Node.Index = undefined;
+    for (stmts) |stmt| {
+        var expr = stmt;
+        if (tree.fullVarDecl(stmt)) |var_decl| {
+            expr = var_decl.ast.init_node.unwrap() orelse continue;
+        }
+        const call = tree.fullCall(&call_buf, expr) orelse continue;
+        if (!callForwardsIdentifier(tree, call, capture)) continue;
+
+        const helper = crossFileHelperCall(tree, call) orelse continue;
+        const alias_tok = import_aliases.get(helper.alias) orelse continue;
+        try applyTableRequirements(gpa, tree, result, r, alias_tok, helper.fn_name, table_name);
+    }
+}
+
+/// Whether `call` passes `name` straight through as one of its arguments —
+/// the loop capture reaching the helper unchanged, which is what makes the
+/// table element and the helper's `opts` parameter the same value.
+fn callForwardsIdentifier(tree: *const Ast, call: Ast.full.Call, name: []const u8) bool {
+    for (call.ast.params) |param| {
+        if (isIdentifierNamed(tree, param, name)) return true;
+    }
+    return false;
+}
+
+/// Records one module per (table element, requirement) pair: the helper named
+/// by `alias_tok`/`fn_name` says which option field holds a root source path
+/// and what module name it gets, and `table_name`'s literal holds the paths.
+fn applyTableRequirements(
+    gpa: Allocator,
+    tree: *const Ast,
+    result: *BuildGraph,
+    resolver: HelperResolver,
+    alias_tok: Ast.TokenIndex,
+    fn_name: []const u8,
+    table_name: []const u8,
+) !void {
+    const rel_path = parseStringLiteral(gpa, tree, alias_tok) catch return;
+    defer gpa.free(rel_path);
+
+    const requirements = (resolver.paramRequirements(gpa, rel_path, fn_name) catch return) orelse return;
+    defer freeParamRequirements(gpa, requirements);
+
+    const table_init = findVarDeclInit(tree, table_name) orelse return;
+    var array_buf: [2]Ast.Node.Index = undefined;
+    const table = tree.fullArrayInit(&array_buf, table_init) orelse return;
+
+    for (table.ast.elements) |element| {
+        for (requirements) |req| {
+            const tok = tableElementPath(tree, element, .{ .field = req.param_field }) orelse continue;
+            const path = parseStringLiteral(gpa, tree, tok) catch continue;
+            defer gpa.free(path);
+
+            const import_name = try gpa.dupe(u8, req.import_name);
+            errdefer gpa.free(import_name);
+            try addModulePath(gpa, result, import_name, path);
+        }
     }
 }
 
