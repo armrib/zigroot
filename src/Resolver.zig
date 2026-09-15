@@ -631,6 +631,12 @@ fn hopDepth(project: *const Project, base: SymbolId, field: []const u8, depth: u
 /// `owner: []Symbol.Id.Optional` (with `Symbol` itself an alias of an
 /// import's export) resolves where the one-hop `crossFileRoot` can't.
 fn declaredType(project: *const Project, base: SymbolId) ?SymbolId {
+    return declaredTypeDepth(project, base, 0);
+}
+
+fn declaredTypeDepth(project: *const Project, base: SymbolId, depth: usize) ?SymbolId {
+    if (depth > max_hop_depth) return null;
+
     const base_file = project.file(base.file);
     const semantic = &base_file.semantic;
     const owner_map = &base_file.owner_map;
@@ -650,6 +656,86 @@ fn declaredType(project: *const Project, base: SymbolId) ?SymbolId {
 
     for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
         if (resolveTypeNode(project, base.file, type_node)) |ty| return ty;
+    }
+
+    return chainSourceType(project, base, depth);
+}
+
+/// Phase 35: `if (self.spoa) |sp| sp.onAccept(res);` written in a file that
+/// doesn't declare `self`'s own struct — the split-implementation shape,
+/// where `HttpServer` lives in `Http.zig` and its io_uring completion arms
+/// live in `http_loop.zig`. `InstanceType.chainSourceBase` hands back the
+/// unwalked condition chain (`self`, at its identifier node); walking it
+/// with a `Project` behind it lands on `HttpServer.spoa`, whose own declared
+/// type (`?*spoa.SpoaServer`) is another cross-`@import` hop the recursion
+/// then resolves. Without this the whole `SpoaServer`/`LocalSocketServer`
+/// method set reads as unreachable, since nothing else names those methods.
+///
+/// The same base covers `for` payloads and `const srv = self.srv;`, which
+/// stall on exactly the same first hop for exactly the same reason.
+fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?SymbolId {
+    const semantic = &project.file(base.file).semantic;
+    const chain_base = InstanceType.chainSourceBase(semantic, base.local) orelse return null;
+    const start: SymbolId = .{ .file = base.file, .local = chain_base.sym };
+    const landed = chainLanding(project, start, chain_base.node, depth) orelse return null;
+
+    // A chain that lands back on where it started (or on `base` itself)
+    // has learned nothing, and recursing into it would not terminate.
+    if (landed.eql(start) or landed.eql(base)) return null;
+    return declaredTypeDepth(project, landed, depth + 1);
+}
+
+/// Where the `.field` chain from `start` (referenced at `start_node`, a node
+/// in `start`'s own file) lands, following the same alias / declared-type /
+/// call-return-type hops `addChain` does but recording no edges — a caller
+/// resolving a *type* needs the landing symbol itself, not a graph
+/// contribution. `null` if the walk stops on a runtime-named `@field(...)`
+/// hop, whose landing is by definition not a single symbol.
+fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.Ast.Node.Index, depth: usize) ?SymbolId {
+    const ast = &project.file(start.file).semantic;
+    var cur = start;
+    var node = start_node;
+    var kind: FieldChain.Kind = .definite;
+
+    var hops: usize = 0;
+    while (hops <= max_hop_depth) : (hops += 1) {
+        const cur_file = project.file(cur.file);
+        const chain = FieldChain.resolveChain(ast, &cur_file.semantic, &cur_file.owner_map, cur.local, node, kind);
+        if (chain.unknown != null) return null;
+
+        const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
+        const step = chainStep(project, cur.file, &chain, depth) orelse return landed;
+        cur = step.next;
+        node = step.node;
+        kind = step.kind;
+    }
+    return null;
+}
+
+const ChainStep = struct {
+    next: SymbolId,
+    node: Semantic.Ast.Node.Index,
+    kind: FieldChain.Kind,
+};
+
+/// The next symbol `chainLanding` should resume its walk from, for a chain
+/// that got stuck on an alias, a cross-file declared type, or a call return
+/// type. `null` when the chain isn't stuck (it's finished) or the stuck hop
+/// itself doesn't resolve (it's as finished as it will get) — `chainLanding`
+/// treats both the same way, by returning where the walk stopped.
+fn chainStep(project: *const Project, cur_file: FileId, chain: *const FieldChain.ChainWalk, depth: usize) ?ChainStep {
+    if (chain.stuck_alias) |stuck| {
+        const aliased = resolveAlias(project, .{ .file = cur_file, .local = stuck.symbol }) orelse return null;
+        if (aliased.file == cur_file and aliased.local == stuck.symbol) return null;
+        return .{ .next = aliased, .node = stuck.node, .kind = stuck.kind };
+    }
+    if (chain.stuck) |stuck| {
+        const ty = declaredTypeDepth(project, .{ .file = cur_file, .local = stuck.symbol }, depth + 1) orelse return null;
+        return .{ .next = ty, .node = stuck.node, .kind = stuck.kind };
+    }
+    if (chain.stuck_call) |stuck_call| {
+        const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse return null;
+        return .{ .next = ty, .node = stuck_call.call_node, .kind = stuck_call.kind };
     }
     return null;
 }

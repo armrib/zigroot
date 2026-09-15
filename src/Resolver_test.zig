@@ -1494,3 +1494,127 @@ test "a member reached through an inline @import(...).member expression is not r
     try t.expectEqual(@as(usize, 1), dead.items.len);
     try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
 }
+
+test "an optional-payload method call resolves when the struct is declared in another file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const loop = @import("loop.zig");
+        \\const spoa = @import("spoa.zig");
+        \\
+        \\pub const Server = struct {
+        \\    spoa: ?*spoa.SpoaServer = null,
+        \\
+        \\    pub const run = loop.run;
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var s = Server{};
+        \\    s.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "loop.zig",
+        \\const Server = @import("main.zig").Server;
+        \\
+        \\pub fn run(self: *Server) void {
+        \\    if (self.spoa) |sp| sp.onAccept(1);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "spoa.zig",
+        \\pub const SpoaServer = struct {
+        \\    n: u32 = 0,
+        \\    pub fn onAccept(self: *SpoaServer, res: i32) void {
+        \\        self.n +%= @intCast(res);
+        \\    }
+        \\    pub fn unusedOne(self: *SpoaServer) void {
+        \\        self.n = 0;
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}
+
+test "a for-payload method call resolves when the struct is declared in another file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const loop = @import("loop.zig");
+        \\const conn = @import("conn.zig");
+        \\
+        \\pub const Server = struct {
+        \\    conns: []conn.Conn = &.{},
+        \\
+        \\    pub const run = loop.run;
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var s = Server{};
+        \\    s.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "loop.zig",
+        \\const Server = @import("main.zig").Server;
+        \\
+        \\pub fn run(self: *Server) void {
+        \\    for (self.conns) |c| c.close();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "conn.zig",
+        \\pub const Conn = struct {
+        \\    fd: i32 = -1,
+        \\    pub fn close(self: Conn) void {
+        \\        _ = self;
+        \\    }
+        \\    pub fn unusedOne(self: Conn) void {
+        \\        _ = self;
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("unusedOne", project.symbol(dead.items[0].id).name);
+}

@@ -171,7 +171,6 @@ pub fn declaredTypeNodes(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) 
     return out;
 }
 
-
 /// A function parameter symbol's declared type node, with one leading
 /// pointer unwrapped (`self: *Foo` -> `Foo`'s node, `self: Foo` -> `Foo`'s
 /// node unchanged).
@@ -227,6 +226,14 @@ pub fn resolveTypeExpr(semantic: *const Semantic, owner_map: *const OwnerMap, no
 /// a different `decl` node shape, so `thenPayloadCondExpr` on the parent
 /// already returns `null` for them.
 fn optionalPayloadSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const base = payloadCondBase(semantic, sym_id) orelse return null;
+    return sameFileChainTarget(semantic, owner_map, base);
+}
+
+/// The base symbol and node of an `if`/`while` optional-payload capture's
+/// condition expression, before any chain-walking. `null` for every other
+/// payload shape, or if the condition isn't an identifier/`.field` chain.
+fn payloadCondBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_payload) return null;
 
@@ -239,8 +246,42 @@ fn optionalPayloadSource(semantic: *const Semantic, owner_map: *const OwnerMap, 
         base_node = ast.nodeData(base_node).node_and_token[0];
     }
     const base_sym = referenceAt(semantic, base_node) orelse return null;
+    return .{ .sym = base_sym, .node = base_node };
+}
 
-    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
+/// The field/variable symbol a `const srv = self.srv;` initializer chain
+/// resolves to, walked within this one file (see `fieldAccessInitBase`).
+fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+    const base = fieldAccessInitBase(semantic, sym_id) orelse return null;
+    return sameFileChainTarget(semantic, owner_map, base);
+}
+
+/// Phase 35: the unwalked chain base behind whichever of the three
+/// "type comes from another declaration" shapes `sym_id` is — an `if`/
+/// `while` optional payload, a `for` payload, or a plain `.field`-
+/// initialized variable. All three resolve same-file above; a `self: *Foo`
+/// receiver whose `Foo` is declared in a *different* file (the split-
+/// implementation shape: `Server` in one file, its `run`/`onAccept` methods
+/// in another) stalls every one of them on the very first hop, since `self`'s
+/// type is an alias of an import. `Resolver.declaredType` re-walks this base
+/// with a `Project` behind it and gets the rest of the way.
+pub fn chainSourceBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
+    if (payloadCondBase(semantic, sym_id)) |base| return base;
+    if (forElementInputBase(semantic, sym_id)) |base| return base;
+    return fieldAccessInitBase(semantic, sym_id);
+}
+
+/// Where `base`'s chain lands, walked within this one file. `null` when the
+/// walk can't finish here — a hop off a field whose own type crosses an
+/// `@import` boundary, an alias naming another file, a runtime-named
+/// `@field`. Reporting that as unresolved rather than handing back the
+/// symbol the walk stalled on is what lets `Resolver.declaredType` retry the
+/// same chain with a `Project` behind it (Phase 35); a stalled landing is a
+/// wrong answer, and a wrong answer masks the retry.
+fn sameFileChainTarget(semantic: *const Semantic, owner_map: *const OwnerMap, base: ChainBase) ?Semantic.Symbol.Id {
+    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base.sym, base.node, .definite);
+    if (chain.stuck != null or chain.stuck_call != null or chain.stuck_alias != null) return null;
+    if (chain.unknown != null) return null;
     return chain.result.symbol;
 }
 
@@ -274,7 +315,11 @@ fn thenPayloadCondExpr(ast: *const Ast, parent: Ast.Node.Index, then_expr: Ast.N
 /// rather than going through a parent lookup. `null` for every other
 /// payload shape, or if the matched input isn't a same-file identifier/
 /// field-access chain.
-const ForElementInput = struct {
+/// A chain's unwalked starting point: the symbol its base identifier names
+/// and the node that identifier sits at. Shared by every shape whose type
+/// comes from *another* declaration's type rather than one of its own
+/// (`if`/`while` payload, `for` payload, plain `.field` initializer).
+pub const ChainBase = struct {
     sym: Semantic.Symbol.Id,
     node: Ast.Node.Index,
 };
@@ -284,7 +329,7 @@ const ForElementInput = struct {
 /// resolves to — the same matching `forElementSource` does, stopping short
 /// of walking it any further. `null` for every other payload shape, or if
 /// the matched input isn't a same-file identifier/field-access chain.
-fn forElementInputBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ForElementInput {
+fn forElementInputBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_payload) return null;
 
@@ -316,8 +361,7 @@ fn forElementInputBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?F
 
 fn forElementSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
     const base = forElementInputBase(semantic, sym_id) orelse return null;
-    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base.sym, base.node, .definite);
-    return chain.result.symbol;
+    return sameFileChainTarget(semantic, owner_map, base);
 }
 
 /// If `sym_id` is a `for (seq) |x|` loop-payload capture, `seq`'s own base
@@ -410,7 +454,7 @@ fn addressOfChainWalk(semantic: *const Semantic, owner_map: *const OwnerMap, sym
 /// with none here, it hands back the field itself. `null` if `sym_id` isn't
 /// such a variable, already has an explicit type annotation, or its
 /// initializer isn't a same-file identifier/`.field` chain.
-fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, sym_id: Semantic.Symbol.Id) ?Semantic.Symbol.Id {
+fn fieldAccessInitBase(semantic: *const Semantic, sym_id: Semantic.Symbol.Id) ?ChainBase {
     const symbol = semantic.symbols.get(sym_id);
     if (!symbol.flags.s_variable) return null;
 
@@ -433,9 +477,7 @@ fn fieldAccessInitSource(semantic: *const Semantic, owner_map: *const OwnerMap, 
         base_node = ast.nodeData(base_node).node_and_token[0];
     }
     const base_sym = referenceAt(semantic, base_node) orelse return null;
-
-    const chain = FieldChain.resolveChain(semantic, semantic, owner_map, base_sym, base_node, .definite);
-    return chain.result.symbol;
+    return .{ .sym = base_sym, .node = base_node };
 }
 
 pub const CrossFileRoot = struct {

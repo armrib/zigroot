@@ -162,6 +162,16 @@ Status: Phase 0-16. Implemented so far:
   and its references are references to *it*. The declaration containing the
   import is now edged straight to the member, and the chain continues from
   there (`@import("main").services_handler.collectServices`).
+- Captures whose type lives in another file (Phase 35): `if (self.spoa)
+  |sp| sp.onAccept(res)`, `for (self.conns) |c| c.close()` and `const ls =
+  self.local;` all take their type from another declaration's type rather
+  than one of their own. That walk was same-file only, so it stalled on the
+  first hop whenever the method's file isn't the file declaring the struct
+  — the split-implementation shape, where `HttpServer` is in one file and
+  its io_uring completion arms are in another. Worse, it handed back the
+  symbol it stalled on, and that wrong answer masked the cross-file retry.
+  The walk now reports a stall as unresolved, and the resolver re-walks the
+  same chain with the whole project behind it.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
