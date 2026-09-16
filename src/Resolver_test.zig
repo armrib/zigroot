@@ -2299,3 +2299,80 @@ test "an element read out of a std list by index carries its methods" {
     }
     try t.expect(found_unused);
 }
+
+test "a payload drained out of a std map carries its methods" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const std = @import("std");
+        \\const types = @import("types.zig");
+        \\
+        \\const Store = struct {
+        \\    snaps: std.AutoHashMapUnmanaged(types.Key, types.Snap) = .empty,
+        \\    runs: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(types.Rec)) = .empty,
+        \\
+        \\    pub fn clear(self: *Store, key: types.Key) void {
+        \\        if (self.snaps.fetchRemove(key)) |old| old.value.free();
+        \\    }
+        \\
+        \\    pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
+        \\        var it = self.runs.valueIterator();
+        \\        while (it.next()) |list| {
+        \\            for (list.items) |rec| rec.release();
+        \\            list.deinit(allocator);
+        \\        }
+        \\        self.runs.deinit(allocator);
+        \\    }
+        \\};
+        \\
+        \\pub fn main() void {
+        \\    var s: Store = .{};
+        \\    s.clear(.{});
+        \\    s.deinit(std.heap.page_allocator);
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "types.zig",
+        \\pub const Key = struct { id: u32 = 0 };
+        \\
+        \\pub const Snap = struct {
+        \\    entries: []const u8 = "",
+        \\    pub fn free(self: Snap) void {
+        \\        _ = self;
+        \\    }
+        \\};
+        \\
+        \\pub const Rec = struct {
+        \\    name: []const u8 = "",
+        \\    pub fn release(self: Rec) void {
+        \\        _ = self;
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const types_path = try tmp.dir.realpathAlloc(t.allocator, "types.zig");
+    defer t.allocator.free(types_path);
+    const types_id = project.by_path.get(types_path).?;
+    const semantic = &project.file(types_id).semantic;
+    const free_sym = semantic.symbols.getSymbolNamed("free").?;
+    const release_sym = semantic.symbols.getSymbolNamed("release").?;
+
+    try t.expect(reachability.isReachable(.{ .file = types_id, .local = free_sym }));
+    try t.expect(reachability.isReachable(.{ .file = types_id, .local = release_sym }));
+}

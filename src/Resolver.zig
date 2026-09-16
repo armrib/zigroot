@@ -851,6 +851,11 @@ fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
     if (!fn_symbol.flags.s_fn) {
         if (fnPointerReturnType(project, fn_sym, 0)) |ty| return ty;
 
+        // Phase 57: the only way a call's callee resolves to a container is
+        // through the std-accessor model above, which already answered with
+        // what the call yields — `map.valueIterator()` is its payload type.
+        if (fn_symbol.flags.intersects(Semantic.Symbol.Flags.s_container)) return fn_sym;
+
         // Calling something that isn't a function: a generic container
         // reached through an alias (`const Mixin = util.Bitflags;
         // Mixin(Flags)`) — unwrap the alias and retry once.
@@ -1014,8 +1019,18 @@ fn hopDepth(project: *const Project, base: SymbolId, field: []const u8, depth: u
         if (!aliased.eql(base)) return hopDepth(project, aliased, field, depth + 1);
     }
 
-    const ty = declaredType(project, base) orelse return null;
-    return hopDepth(project, ty, field, depth + 1);
+    if (declaredType(project, base)) |ty| {
+        if (hopDepth(project, ty, field, depth + 1)) |found| return found;
+    }
+
+    // Phase 57: the hop reads a std container this project never analyzes
+    // (`map.fetchRemove`, `map.valueIterator`), or reads the payload back out
+    // of the wrapper one of those returned (`kv.value`, `it.next`).
+    if (isPayloadAccessor(field)) {
+        if (genericPayload(project, base, depth + 1)) |payload| return payload;
+    }
+    if (isPayloadCarrier(field) and isContainer(project, base)) return base;
+    return null;
 }
 
 /// `base`'s own declared type, resolved same-file via `InstanceType.resolve`
@@ -1122,7 +1137,13 @@ fn chainSourceType(project: *const Project, base: SymbolId, depth: usize) ?Symbo
     // `max_hop_depth` already bounds.
     if (landed.eql(base)) return null;
     if (chain_base.landing_is_type or landing.is_type) return landed;
-    return declaredTypeDepth(project, landed, depth + 1);
+    if (declaredTypeDepth(project, landed, depth + 1)) |ty| return ty;
+
+    // Phase 57: a chain that lands on a container declaration has landed on
+    // the type itself — `for (list.items) |rec|` where `list` resolved to
+    // `Rec` through the std model. A container has no declared type to read.
+    if (isContainer(project, landed)) return landed;
+    return null;
 }
 
 /// Where the `.field` chain from `start` (referenced at `start_node`, a node
@@ -1217,32 +1238,105 @@ const Landing = struct {
     is_type: bool,
 };
 
-/// Phase 52: `redirect_uri_pending: std.ArrayListUnmanaged(RedirectUriRequest)`
-/// iterated as `for (self.redirect_uri_pending.items) |*existing|`. The
-/// container type comes from a module this project never analyzes, so there is
-/// no `items` to find and no return type to read — but the element type is
-/// written right there in the instantiation, as its first resolvable type
-/// argument. Only an `items` hop is matched: that is the one field name whose
-/// meaning is fixed across std's list types.
-fn genericElement(project: *const Project, ast: *const Semantic, base: SymbolId, node: Semantic.Ast.Node.Index) ?SymbolId {
+/// Phase 52/57: `redirect_uri_pending: std.ArrayListUnmanaged(RedirectUriRequest)`
+/// iterated as `for (self.redirect_uri_pending.items) |*existing|`;
+/// `env_snapshots: std.AutoHashMapUnmanaged(Key, EnvSnapshot)` drained as
+/// `if (map.fetchRemove(k)) |old| old.value.free(a)`. The container comes from
+/// a module this project never analyzes, so the accessor has no declaration to
+/// find and no return type to read — but what it yields is written right there
+/// in the instantiation, as a type argument.
+///
+/// This is a model of std's container API keyed by name, and it is deliberately
+/// a coarse one: every accessor is taken to yield the *payload* type, and the
+/// payload is the last type argument that resolves (the value of a map, the
+/// element of a list), recursing when that argument is itself an instantiation.
+/// Getting it wrong can only add an edge, never invent a finding.
+fn genericPayloadHop(project: *const Project, ast: *const Semantic, base: SymbolId, node: Semantic.Ast.Node.Index) ?SymbolId {
     // `node` indexes the AST the walk started in, which is not `base`'s file
     // once the chain has crossed an `@import`.
     const name = FieldChain.fieldAccessName(ast, node) orelse return null;
-    if (!std.mem.eql(u8, name, "items")) return null;
+    if (!isPayloadAccessor(name)) return null;
+    return genericPayload(project, base, 0);
+}
 
+/// The payload type of `base`'s declared type, when that type is a generic
+/// instantiation this project can't resolve. `null` when it isn't one, or when
+/// no argument of it names a type this project declares.
+fn genericPayload(project: *const Project, base: SymbolId, depth: usize) ?SymbolId {
+    if (depth > max_hop_depth) return null;
     const semantic = &project.file(base.file).semantic;
-    const base_ast = &semantic.parse.ast;
     for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
-        var buf: [1]Ast.Node.Index = undefined;
-        const call = base_ast.fullCall(&buf, type_node) orelse continue;
-        for (call.ast.params) |param| {
-            const ty = resolveTypeNode(project, base.file, param) orelse continue;
+        if (payloadOfInstantiation(project, base.file, type_node, depth)) |ty| return ty;
+    }
+    return null;
+}
+
+/// The payload type named by the instantiation at `node`: its last type
+/// argument that resolves, so a map yields its value and a list its element.
+/// An argument that is itself an instantiation is looked through.
+fn payloadOfInstantiation(project: *const Project, file_id: FileId, node: Ast.Node.Index, depth: usize) ?SymbolId {
+    if (depth > max_hop_depth) return null;
+
+    const ast = &project.file(file_id).semantic.parse.ast;
+    var buf: [1]Ast.Node.Index = undefined;
+    const call = ast.fullCall(&buf, node) orelse return null;
+
+    var i = call.ast.params.len;
+    while (i > 0) {
+        i -= 1;
+        const param = call.ast.params[i];
+        if (resolveTypeNode(project, file_id, param)) |ty| {
             // The argument is usually spelled through a local alias
             // (`const Req = types.Req;`), which has no members of its own.
             return aliasTarget(project, ty);
         }
+        if (payloadOfInstantiation(project, file_id, param, depth + 1)) |ty| return ty;
     }
     return null;
+}
+
+/// Whether `name` is a std container accessor — something that hands back the
+/// container's payload, whether directly or wrapped in an iterator or a `KV`.
+fn isPayloadAccessor(name: []const u8) bool {
+    const names = [_][]const u8{
+        "items",       "values",         "valueIterator", "valuePtr",
+        "get",         "getPtr",         "getLast",       "getLastOrNull",
+        "fetchRemove", "fetchPut",       "fetchOrderedRemove", "fetchSwapRemove",
+        "pop",         "popOrNull",      "addOne",        "addOneAssumeCapacity",
+        "getOrPut",    "getOrPutValue",  "iterator",      "orderedRemove",
+        "swapRemove",  "at",             "slice",
+    };
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+/// Whether `name` is a field of one of std's carrier structs — the `KV` a
+/// `fetchRemove` returns, the pointer an iterator's `next` hands back. A hop
+/// naming one of these reads the payload back out of its wrapper, so it lands
+/// on the same type the accessor already resolved to.
+fn isPayloadCarrier(name: []const u8) bool {
+    const names = [_][]const u8{ "value", "value_ptr", "key_ptr", "next", "items" };
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+/// The node past a carrier hop written at `node`, if that is what the next hop
+/// is. `null` when there is no hop left, or it names something real.
+fn carrierHop(ast: *const Semantic, node: Semantic.Ast.Node.Index) ?Semantic.Ast.Node.Index {
+    const name = FieldChain.fieldAccessName(ast, node) orelse return null;
+    if (!isPayloadCarrier(name)) return null;
+    return ast.node_links.getParent(node);
+}
+
+/// Whether `id` names a container declaration — a `struct`/`union`/`enum`, as
+/// opposed to a variable or field whose own type still has to be read.
+fn isContainer(project: *const Project, id: SymbolId) bool {
+    const flags = project.file(id.file).semantic.symbols.get(id.local).flags;
+    return flags.intersects(Semantic.Symbol.Flags.s_container);
 }
 
 /// A resumption step for a chain that ended on `landed` with a `.field` hop
@@ -1328,7 +1422,7 @@ fn chainStep(project: *const Project, ast: *const Semantic, cur_file: FileId, ch
         if (declaredTypeDepth(project, stuck_id, depth + 1)) |ty| {
             return .{ .next = ty, .node = stuck.node, .kind = stuck.kind };
         }
-        const element = genericElement(project, ast, stuck_id, stuck.node) orelse return null;
+        const element = genericPayloadHop(project, ast, stuck_id, stuck.node) orelse return null;
         return .{ .next = element, .node = stuck.node, .kind = .possible, .is_type = true };
     }
     if (chain.stuck_call) |stuck_call| {
@@ -1370,6 +1464,7 @@ fn addChain(
     var chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, start, start_node, start_kind);
 
     var alias_hops: usize = 0;
+    var carrier_hops: usize = 0;
     while (true) {
         // Every symbol a segment passed through is as used as its end.
         for (chain.visitedSlice()) |through| {
@@ -1425,6 +1520,16 @@ fn addChain(
             cur_symbols = &next_file.semantic;
             cur_owner_map = &next_file.owner_map;
             chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, ty.local, stuck.node, stuck.kind);
+            continue;
+        }
+
+        if (carrierHop(ast, chain.result.node)) |past_hop| {
+            // Phase 57: `old.value.free(a)` — `old` already resolved to the
+            // map's payload, so the `.value` that reads it out of std's `KV`
+            // lands right back on it. Step past the hop and keep walking.
+            carrier_hops += 1;
+            if (carrier_hops > max_hop_depth) break;
+            chain = FieldChain.resolveChain(ast, cur_symbols, cur_owner_map, chain.result.symbol, past_hop, .possible);
             continue;
         }
 

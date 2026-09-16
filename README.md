@@ -323,6 +323,16 @@ Status: Phase 0-16. Implemented so far:
   back `sub`'s own type. A walk that stops with a hop still to go now resolves
   the landing's type and resumes.
 
+- A payload drained out of a std container (Phase 57): `if (map.fetchRemove(k))
+  |old| old.value.free(a)`, `var it = map.valueIterator(); while (it.next())
+  |list| for (list.items) |rec| rec.free(a)`. Phase 52's `items`-only rule is
+  generalised into a model of std's container API keyed by name: any accessor
+  yields the instantiation's *payload* — its last type argument that resolves,
+  looked through when that argument is itself an instantiation — and the fields
+  std's carriers expose it through (`value`, `value_ptr`, `next`) land back on
+  the same type. Coarse by design: getting it wrong can only add an edge, never
+  invent a finding.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
