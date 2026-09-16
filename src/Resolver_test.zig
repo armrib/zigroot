@@ -2376,3 +2376,121 @@ test "a payload drained out of a std map carries its methods" {
     try t.expect(reachability.isReachable(.{ .file = types_id, .local = free_sym }));
     try t.expect(reachability.isReachable(.{ .file = types_id, .local = release_sym }));
 }
+
+test "a chain narrowed to a cross-file re-export edges the re-export itself, not only what it lands on" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\pub const codec_mod = @import("codec.zig");
+        \\pub fn main() void {
+        \\    const hub = @import("hub.zig");
+        \\    _ = hub.dispatch();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "hub.zig",
+        \\const Codec = @import("main.zig").codec_mod.Codec;
+        \\pub fn dispatch() usize {
+        \\    const d = Codec.decode(&[_]u8{});
+        \\    return d.len;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "codec.zig",
+        \\pub const Codec = struct {
+        \\    pub fn decode(buf: []const u8) []const u8 {
+        \\        return buf[0..0];
+        \\    }
+        \\};
+        \\
+    );
+
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    try t.expectEqual(@as(usize, 0), dead.items.len);
+}
+
+test "a member chain through an import name bound to several candidate files resolves against the candidate that exports it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // `other_main.zig` is bound to "main" first; the chain's target only
+    // exists in `src/main.zig`.
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const other = b.createModule(.{ .root_source_file = b.path("src/other_main.zig") });
+        \\    const main = b.createModule(.{ .root_source_file = b.path("src/main.zig") });
+        \\    const hub = b.createModule(.{ .root_source_file = b.path("src/hub.zig") });
+        \\    hub.addImport("main", other);
+        \\    hub.addImport("main", main);
+        \\    b.addExecutable(.{ .name = "repro", .root_module = main });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\pub const codec_mod = @import("codec.zig");
+        \\pub fn main() void {
+        \\    const hub = @import("hub.zig");
+        \\    _ = hub.report();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/other_main.zig",
+        \\pub const nothing: u32 = 0;
+        \\
+    );
+    try writeFile(tmp.dir, "src/hub.zig",
+        \\const Codec = @import("main").codec_mod.Codec;
+        \\pub fn report() usize {
+        \\    return Codec.header_len;
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/codec.zig",
+        \\pub const Codec = struct {
+        \\    pub const header_len: usize = 8;
+        \\};
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "src/main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+    try project.loadBuildGraph(build_zig_path);
+    _ = try project.addRoot(root_path);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    var dead = try reachability.deadSymbols(t.allocator, &project);
+    defer dead.deinit(t.allocator);
+
+    // Only `other_main.zig`'s `nothing` is genuinely unused.
+    try t.expectEqual(@as(usize, 1), dead.items.len);
+    try t.expectEqualStrings("nothing", project.symbol(dead.items[0].id).name);
+}

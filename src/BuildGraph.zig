@@ -337,6 +337,17 @@ pub fn parseInto(
             continue;
         }
 
+        if (std.mem.eql(u8, field, "addOptions")) {
+            // `<module>.addOptions("name", opts)` binds a generated options
+            // module: a real `@import("name")` with no source file behind
+            // it, so it's a reachability sink like a dependency, never a gap.
+            if (call.ast.params.len >= 2 and tree.nodeTag(call.ast.params[0]) == .string_literal) {
+                const import_name = parseStringLiteral(gpa, &tree, tree.nodeMainToken(call.ast.params[0])) catch continue;
+                try addExternalName(gpa, result, import_name);
+            }
+            continue;
+        }
+
         if (resolver) |r| {
             if (crossFileHelperCall(&tree, call)) |helper_call| {
                 if (import_aliases.get(helper_call.alias)) |alias_tok| {

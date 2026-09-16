@@ -131,8 +131,16 @@ pub fn build(gpa: Allocator, project: *const Project) Allocator.Error!SymbolGrap
             const owner_id: SymbolId = .{ .file = import_edge.from, .local = owner };
 
             if (FieldChain.fieldAccessName(&from_file.semantic, ref.node)) |field_name| {
-                const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, import_root, field_name) orelse continue;
                 const field_node = from_file.semantic.node_links.getParent(ref.node).?;
+                // The export the binding was narrowed to is referenced even
+                // when the next hop can't be followed in this file — a
+                // re-export (`pub const codec_mod = @import("codec.zig")`)
+                // is resolved by `buildAliasEdges` instead, but only the
+                // hop lands there, never `codec_mod` itself.
+                if (import_root != FILE_ROOT_SYMBOL) {
+                    try graph.addEdge(gpa, owner_id, .{ .file = import_edge.to, .local = import_root }, field_node, .definite);
+                }
+                const target_local = FieldChain.findExport(target_semantic, &target_file.owner_map, import_root, field_name) orelse continue;
                 // The export named right after the boundary is referenced
                 // whether or not the chain continues past it (`zigroot.Roots`
                 // in `zigroot.Roots.build(...)`).
@@ -657,26 +665,25 @@ fn buildInstanceTypes(gpa: Allocator, graph: *SymbolGraph, project: *const Proje
     }
 }
 
-/// One of `file_id`'s `@import` edges whose binding symbol is `base`, if
-/// any.
-fn importEdge(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?ImportGraph.Edge {
+/// `base.field`, where `base` is one of `file_id`'s `@import` bindings:
+/// `field` matched against the target file's exports (or, if `base` is an
+/// alias binding narrowed to one export — see `aliasRoot` — against that
+/// export). A name bound by more than one `addImport` (one per build
+/// branch) has one edge per candidate file on the same `@import` node;
+/// every candidate is tried and the first one exporting `field` wins, so
+/// which branch `BuildGraph` happened to record first doesn't decide it.
+fn importHop(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id, field: []const u8) ?SymbolId {
+    const from_file = project.file(file_id);
     for (project.import_graph.edgesFrom(file_id)) |edge| {
-        const binding = project.file(edge.from).owner_map.get(edge.node) orelse continue;
-        if (binding == base) return edge;
+        const binding = from_file.owner_map.get(edge.node) orelse continue;
+        if (binding != base) continue;
+        const target_file = project.file(edge.to);
+        const root = aliasRoot(&from_file.semantic, edge.node, &target_file.semantic, &target_file.owner_map) orelse FILE_ROOT_SYMBOL;
+        if (FieldChain.findExport(&target_file.semantic, &target_file.owner_map, root, field)) |found| {
+            return .{ .file = edge.to, .local = found };
+        }
     }
     return null;
-}
-
-/// `importTarget`'s target file plus, if `base` is an alias binding
-/// narrowed to one export (see `aliasRoot`), that export — otherwise the
-/// target file's own root. The container every `base.field` hop into the
-/// target file should resolve against.
-fn importTargetRoot(project: *const Project, file_id: FileId, base: Semantic.Symbol.Id) ?struct { file: FileId, root: Semantic.Symbol.Id } {
-    const edge = importEdge(project, file_id, base) orelse return null;
-    const target_file = project.file(edge.to);
-    const from_semantic = &project.file(file_id).semantic;
-    const root = aliasRoot(from_semantic, edge.node, &target_file.semantic, &target_file.owner_map) orelse FILE_ROOT_SYMBOL;
-    return .{ .file = edge.to, .root = root };
 }
 
 /// Phase 17: `var s = Foo.init(...); s.run();`, where `Foo.init` (or its
@@ -959,7 +966,7 @@ fn resolveValueChain(project: *const Project, file_id: FileId, node: Ast.Node.In
         // A bare `@import("x.zig")` in value position names the target
         // file's root — the whole file as a container.
         .builtin_call_two, .builtin_call_two_comma => blk: {
-            if (!std.mem.eql(u8, semantic.tokenSlice(ast.nodeMainToken(node)), "@import")) break :blk null;
+            if (!isImportCall(semantic, node)) break :blk null;
             const edge = importEdgeAtNode(project, file_id, node) orelse break :blk null;
             break :blk .{ .file = edge.to, .local = FILE_ROOT_SYMBOL };
         },
@@ -1008,12 +1015,7 @@ fn hopDepth(project: *const Project, base: SymbolId, field: []const u8, depth: u
         return .{ .file = base.file, .local = found };
     }
 
-    if (importTargetRoot(project, base.file, base.local)) |target| {
-        const target_file = project.file(target.file);
-        if (FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, field)) |found| {
-            return .{ .file = target.file, .local = found };
-        }
-    }
+    if (importHop(project, base.file, base.local, field)) |found| return found;
 
     if (resolveAlias(project, base)) |aliased| {
         if (!aliased.eql(base)) return hopDepth(project, aliased, field, depth + 1);
@@ -1036,8 +1038,7 @@ fn hopDepth(project: *const Project, base: SymbolId, field: []const u8, depth: u
 /// `base`'s own declared type, resolved same-file via `InstanceType.resolve`
 /// or, if the type expression itself crosses an `@import` boundary
 /// (`InstanceType.crossFileRoot`), by resolving that boundary the same way
-/// `importTargetRoot` + `FieldChain.findExport` already do for a binding's
-/// own field hops above. `null` if `base` has no syntactically-resolvable
+/// `importHop` already does for a binding's own field hops above. `null` if `base` has no syntactically-resolvable
 /// declared type.
 ///
 /// Phase 30: failing both, every declared-type node `InstanceType` knows
@@ -1067,12 +1068,7 @@ fn declaredTypeDepth(project: *const Project, base: SymbolId, depth: usize) ?Sym
     if (chainSourceType(project, base, depth)) |ty| return ty;
 
     if (InstanceType.crossFileRoot(semantic, owner_map, base.local)) |root| {
-        if (importTargetRoot(project, base.file, root.base)) |target| {
-            const target_file = project.file(target.file);
-            if (FieldChain.findExport(&target_file.semantic, &target_file.owner_map, target.root, root.field)) |ty| {
-                return .{ .file = target.file, .local = ty };
-            }
-        }
+        if (importHop(project, base.file, root.base, root.field)) |ty| return ty;
     }
 
     for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
@@ -1299,12 +1295,12 @@ fn payloadOfInstantiation(project: *const Project, file_id: FileId, node: Ast.No
 /// container's payload, whether directly or wrapped in an iterator or a `KV`.
 fn isPayloadAccessor(name: []const u8) bool {
     const names = [_][]const u8{
-        "items",       "values",         "valueIterator", "valuePtr",
-        "get",         "getPtr",         "getLast",       "getLastOrNull",
-        "fetchRemove", "fetchPut",       "fetchOrderedRemove", "fetchSwapRemove",
-        "pop",         "popOrNull",      "addOne",        "addOneAssumeCapacity",
-        "getOrPut",    "getOrPutValue",  "iterator",      "orderedRemove",
-        "swapRemove",  "at",             "slice",
+        "items",       "values",        "valueIterator",      "valuePtr",
+        "get",         "getPtr",        "getLast",            "getLastOrNull",
+        "fetchRemove", "fetchPut",      "fetchOrderedRemove", "fetchSwapRemove",
+        "pop",         "popOrNull",     "addOne",             "addOneAssumeCapacity",
+        "getOrPut",    "getOrPutValue", "iterator",           "orderedRemove",
+        "swapRemove",  "at",            "slice",
     };
     for (names) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
@@ -1441,8 +1437,8 @@ fn chainStep(project: *const Project, ast: *const Semantic, cur_file: FileId, ch
 /// type crosses another `@import` boundary (`h.foo.bar()`, where `foo`'s
 /// type is `mod.Foo`) — the same shape `buildInstanceTypes` resolves for a
 /// chain's *starting* symbol, just reached mid-chain instead — resolves that
-/// hop the same way (`InstanceType.crossFileRoot` + `importTargetRoot` +
-/// `FieldChain.findExport`) and resumes the walk in the target file. Loops
+/// hop the same way (`InstanceType.crossFileRoot` + `importHop`) and
+/// resumes the walk in the target file. Loops
 /// since the newly-resolved type can itself have a field with yet another
 /// cross-file type.
 fn addChain(

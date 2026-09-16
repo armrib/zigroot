@@ -346,7 +346,14 @@ set (e.g. `linux.zig` vs `windows.zig` picked by `target.os.tag`) actually
 runs. Rather than guess, it keeps every `addImport`-bound candidate for a
 given import name and treats them all as reachable — over-approximating
 reachability instead of risking a false orphan/dead report for the branch
-not taken.
+not taken. A member chain through such a name (`@import("name").a.b`)
+is tried against every candidate and lands on the first file that exports
+the member; when several do, only that first one is edged.
+
+An options module (`<module>.addOptions("name", opts)`) is a real
+`@import("name")` with no source file behind it: the name is recorded as
+external, like a `b.dependency(...)` module, rather than reported as an
+unknown module.
 
 ## Build
 

@@ -973,3 +973,24 @@ test "b.addModule counts as a library, and a b.dependency-backed addImport name 
     try t.expect(!graph.isExternal("mylib"));
     try t.expectEqualStrings("src/root.zig", graph.resolve("mylib").?[0]);
 }
+
+test "an addOptions-bound module name is external, not an unknown module" {
+    var graph = try parse(
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const opts = b.addOptions();
+        \\    opts.addOption([]const u8, "durability", "fast");
+        \\    const exe = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_source_file = b.path("src/main.zig"),
+        \\    });
+        \\    exe.root_module.addOptions("tuning", opts);
+        \\}
+        \\
+    );
+    defer graph.deinit(t.allocator);
+
+    try t.expect(graph.isExternal("tuning"));
+    try t.expect(graph.resolve("tuning") == null);
+    try t.expectEqualStrings("src/main.zig", graph.exe_roots.items[0]);
+}
