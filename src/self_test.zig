@@ -37,6 +37,7 @@ const expected_project_layer = [_][]const u8{
     "src/root.zig:InstanceType",
     "src/root.zig:BuildGraph",
     "src/root.zig:ZonFile",
+    "src/root.zig:ExportContract",
 };
 
 test "self-run: analyzing this repository reports only the expected dead declarations" {

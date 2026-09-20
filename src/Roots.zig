@@ -15,6 +15,8 @@
 //!   shares with consumers it can't see (`isSharedDependency`), or in a
 //!   file a `b.addLibrary`/`b.addModule` root reaches, whose consumers are
 //!   equally invisible (`Project.isLibraryApi`).
+//! - `.contract`: every declaration the project's `.zigroot.zon` names as
+//!   published API — see `ExportContract`, for callers outside the file set.
 //! - `.comptime_block`: every symbol referenced from a container-level
 //!   `comptime { ... }` block (`comptime { _ = Foo; }`, the idiom for
 //!   forcing analysis of a declaration). Zig evaluates such a block
@@ -44,7 +46,7 @@ const Resolver = @import("Resolver.zig");
 
 const Roots = @This();
 
-pub const RootKind = enum { executable_entry, @"export", public_api, comptime_block, test_block };
+pub const RootKind = enum { executable_entry, @"export", public_api, contract, comptime_block, test_block };
 
 /// Whether `pub` alone makes a symbol a root.
 ///
@@ -90,6 +92,19 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             if (semantic.getBinding(Semantic.ROOT_SCOPE_ID, name)) |local| {
                 try roots.add(gpa, .{ .file = file_id, .local = local }, .executable_entry);
             }
+        }
+    }
+
+    for (project.contract_roots.items) |entry| {
+        const semantic = &project.file(entry.file).semantic;
+        if (entry.symbol) |local| {
+            try roots.add(gpa, .{ .file = entry.file, .local = local }, .contract);
+            continue;
+        }
+        var it = semantic.symbols.iter();
+        while (it.next()) |local| {
+            if (semantic.symbols.get(local).visibility != .public) continue;
+            try roots.add(gpa, .{ .file = entry.file, .local = local }, .contract);
         }
     }
 

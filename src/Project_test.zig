@@ -899,3 +899,68 @@ test "a library root's pub surface is API even when the same build.zig builds ex
     const unused = main_sem.symbols.getSymbolNamed("unused").?;
     try t.expect(!reachability.isReachable(.{ .file = main_id, .local = unused }));
 }
+
+test "an export contract roots what it names and reports what it doesn't" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, ".zigroot.zon",
+        \\.{
+        \\    .exports = .{
+        \\        "src/main.zig:published",
+        \\        "src/main.zig:gone",
+        \\    },
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\pub fn main() void {}
+        \\pub fn published() void { helper(); }
+        \\fn helper() void {}
+        \\pub fn unpublished() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+
+    try t.expectEqual(@as(usize, 1), project.contract_roots.items.len);
+    try t.expectEqual(@as(usize, 1), project.contract_unresolved.items.len);
+    try t.expectEqualStrings("src/main.zig:gone", project.contract_unresolved.items[0]);
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const main_id = project.roots.items[0];
+    const semantic = &project.file(main_id).semantic;
+
+    // The entry roots the declaration and, through it, what it calls; `pub`
+    // on its own still isn't API in an executable.
+    inline for (.{ "published", "helper" }) |name| {
+        const id = semantic.symbols.getSymbolNamed(name).?;
+        try t.expect(reachability.isReachable(.{ .file = main_id, .local = id }));
+    }
+    const unpublished = semantic.symbols.getSymbolNamed("unpublished").?;
+    try t.expect(!reachability.isReachable(.{ .file = main_id, .local = unpublished }));
+}

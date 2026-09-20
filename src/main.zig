@@ -104,6 +104,19 @@ pub fn main() !u8 {
         }
     }
 
+    if (project.contract_unresolved.items.len > 0) {
+        // A contract entry that names nothing is the failure mode this whole
+        // mechanism exists to avoid: a declaration kept alive by a line
+        // nobody checks.
+        std.debug.print("\n{d} stale export contract entr(ies) in '.zigroot.zon':\n", .{
+            project.contract_unresolved.items.len,
+        });
+        for (project.contract_unresolved.items) |spec| {
+            std.debug.print("  {s}: names no loaded file or declaration\n", .{spec});
+        }
+        had_findings = true;
+    }
+
     var discovered = project.discoverZigFiles(".") catch |err| {
         std.debug.print("error: failed to scan '.': {s}\n", .{@errorName(err)});
         return 2;

@@ -811,6 +811,10 @@ pub fn callInstanceType(project: *const Project, file_id: FileId, sym_id: Semant
     };
 
     const fn_sym = resolveValueChain(project, file_id, fn_expr) orelse return initChainType(project, file_id, sym_id);
+    // Phase 60: `const p = self.txns.getPtr(id)` — the callee's return type is
+    // written in its generic's vocabulary (`?*V`), and the receiver is what
+    // says which type that is.
+    if (genericReturnType(project, fn_sym, receiverInstantiation(project, file_id, fn_expr))) |ty| return ty;
     return resolveFnReturnType(project, fn_sym) orelse initChainType(project, file_id, sym_id);
 }
 
@@ -925,6 +929,136 @@ fn resolveFnReturnType(project: *const Project, fn_sym: SymbolId) ?SymbolId {
         return .{ .file = fn_sym.file, .local = container };
     }
     return resolveTypeNode(project, fn_sym.file, return_node);
+}
+
+/// The instantiation written on the receiver of a method call — `txns` in
+/// `self.txns.getPtr(id)`, declared `SmallMap(TxnId, ActiveTxn)`. `null`
+/// when the callee names no receiver or the receiver isn't an instantiation.
+fn receiverInstantiation(project: *const Project, file_id: FileId, fn_expr: Ast.Node.Index) ?Instantiation {
+    const ast = &project.file(file_id).semantic.parse.ast;
+    if (ast.nodeTag(fn_expr) != .field_access) return null;
+    const receiver = ast.nodeData(fn_expr).node_and_token[0];
+    const base = resolveValueChain(project, file_id, receiver) orelse return null;
+    return instantiationOf(project, base);
+}
+
+/// The generic instantiation `base`'s declared type is written as, if it is
+/// one — `SmallMap(TxnId, ActiveTxn)` for `txns: SmallMap(TxnId, ActiveTxn)`.
+/// Only the type expression is read; nothing is resolved here.
+fn instantiationOf(project: *const Project, base: SymbolId) ?Instantiation {
+    const semantic = &project.file(base.file).semantic;
+    const ast = &semantic.parse.ast;
+    for (InstanceType.declaredTypeNodes(semantic, base.local).slice()) |type_node| {
+        var buf: [1]Ast.Node.Index = undefined;
+        if (ast.fullCall(&buf, type_node) == null) continue;
+        return .{ .file = base.file, .node = type_node };
+    }
+    return null;
+}
+
+/// Phase 60: `self.txns.getPtr(id)`, where `txns: SmallMap(TxnId, ActiveTxn)`
+/// and `SmallMap`'s `getPtr` returns `?*V` — a type parameter of the generic
+/// it is declared inside. The return type is written in the generic's own
+/// vocabulary, so reading it where the generic is declared answers `V` and
+/// nothing more; the meaning lives at the instantiation, which `chainLanding`
+/// carried here. Phase 52/57 model this for std's containers by accessor
+/// name; a generic this project declares says it exactly.
+///
+/// `null` unless every part is present: an instantiation to read, a callee
+/// declared inside a generic function, and a return type naming one of that
+/// function's `comptime <name>: type` parameters.
+fn genericReturnType(project: *const Project, fn_sym: SymbolId, inst: ?Instantiation) ?SymbolId {
+    const instantiation = inst orelse return null;
+    const fn_file = project.file(fn_sym.file);
+    const fn_symbol = fn_file.semantic.symbols.get(fn_sym.local);
+    if (!fn_symbol.flags.s_fn) return null;
+
+    const generic = enclosingGenericFn(project, fn_sym) orelse return null;
+    const return_name = returnTypeName(&fn_file.semantic, fn_symbol.decl) orelse return null;
+    const index = comptimeTypeParamIndex(project, generic, return_name) orelse return null;
+
+    const inst_ast = &project.file(instantiation.file).semantic.parse.ast;
+    var buf: [1]Ast.Node.Index = undefined;
+    const call = inst_ast.fullCall(&buf, instantiation.node) orelse return null;
+    if (index >= call.ast.params.len) return null;
+
+    const ty = resolveTypeNode(project, instantiation.file, call.ast.params[index]) orelse return null;
+    return aliasTarget(project, ty);
+}
+
+/// The function `sym` is declared inside, when that function returns a type
+/// — the `fn SmallMap(comptime K: type, comptime V: type) type { return
+/// struct { ... } }` shape. `null` for a method of an ordinary container.
+fn enclosingGenericFn(project: *const Project, sym: SymbolId) ?SymbolId {
+    const file = project.file(sym.file);
+    const semantic = &file.semantic;
+    var owner = file.owner_map.get(semantic.symbols.get(sym.local).decl) orelse return null;
+
+    // The `return struct { ... }` may or may not carry a symbol of its own,
+    // so accept either it or the function directly, one level apart.
+    var hops: usize = 0;
+    while (hops < 2) : (hops += 1) {
+        const owner_symbol = semantic.symbols.get(owner);
+        if (owner_symbol.flags.s_fn) {
+            const id: SymbolId = .{ .file = sym.file, .local = owner };
+            return if (returnsType(project, id)) id else null;
+        }
+        owner = file.owner_map.get(owner_symbol.decl) orelse return null;
+    }
+    return null;
+}
+
+/// Whether `fn_sym`'s declared return type is the `type` keyword.
+fn returnsType(project: *const Project, fn_sym: SymbolId) bool {
+    const semantic = &project.file(fn_sym.file).semantic;
+    const symbol = semantic.symbols.get(fn_sym.local);
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, symbol.decl) orelse return false;
+    const return_node = proto.ast.return_type.unwrap() orelse return false;
+    return isTypeKeyword(semantic, return_node);
+}
+
+/// The bare identifier a function's return type is written as, with the
+/// optional/pointer/error-union wrappers stepped over — `V` for `?*V`.
+/// `null` when the return type is anything more structured.
+fn returnTypeName(semantic: *const Semantic, decl: Ast.Node.Index) ?[]const u8 {
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, decl) orelse return null;
+    var node = proto.ast.return_type.unwrap() orelse return null;
+
+    var unwraps: usize = 0;
+    while (unwraps < max_hop_depth) : (unwraps += 1) {
+        switch (ast.nodeTag(node)) {
+            .error_union => node = ast.nodeData(node).node_and_node[1],
+            .optional_type => node = ast.nodeData(node).node,
+            .identifier => return ast.tokenSlice(ast.nodeMainToken(node)),
+            else => {
+                const ptr = ast.fullPtrType(node) orelse return null;
+                node = ptr.ast.child_type;
+            },
+        }
+    }
+    return null;
+}
+
+/// The index of `generic`'s `comptime <name>: type` parameter called `name`.
+fn comptimeTypeParamIndex(project: *const Project, generic: SymbolId, name: []const u8) ?usize {
+    const semantic = &project.file(generic.file).semantic;
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, semantic.symbols.get(generic.local).decl) orelse return null;
+
+    var it = proto.iterate(ast);
+    var i: usize = 0;
+    while (it.next()) |param| : (i += 1) {
+        const name_token = param.name_token orelse continue;
+        if (!std.mem.eql(u8, ast.tokenSlice(name_token), name)) continue;
+        if (!isComptimeTypeParam(project, generic, i)) return null;
+        return i;
+    }
+    return null;
 }
 
 /// Phase 47: two `build.zig` files in one project can register the same
@@ -1212,6 +1346,7 @@ pub fn chainTargets(
     var cur = start;
     var node = start_node;
     var kind: FieldChain.Kind = .definite;
+    var inst: ?Instantiation = null;
 
     var hops: usize = 0;
     while (hops <= max_hop_depth) : (hops += 1) {
@@ -1227,12 +1362,13 @@ pub fn chainTargets(
         };
 
         const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
-        const step = chainStep(project, ast, cur.file, &chain, 0) orelse
+        const step = chainStep(project, ast, cur.file, &chain, 0, inst) orelse
             unconsumedHop(project, ast, cur, landed, &chain, 0) orelse return;
         try out.append(gpa, step.next);
         cur = step.next;
         node = step.node;
         kind = step.kind;
+        if (step.inst) |found| inst = found;
     }
 }
 
@@ -1242,6 +1378,7 @@ fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.A
     var node = start_node;
     var kind: FieldChain.Kind = .definite;
     var stepped_to_type = false;
+    var inst: ?Instantiation = null;
 
     var hops: usize = 0;
     while (hops <= max_hop_depth) : (hops += 1) {
@@ -1250,7 +1387,7 @@ fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.A
         if (chain.unknown != null) return null;
 
         const landed: SymbolId = .{ .file = cur.file, .local = chain.result.symbol };
-        const step = chainStep(project, ast, cur.file, &chain, depth) orelse blk: {
+        const step = chainStep(project, ast, cur.file, &chain, depth, inst) orelse blk: {
             // Phase 56: the walk can stop with hops still to go. `const sub =
             // self.subs.items[i];` leaves `sub` no declared type node, so
             // `FieldChain` has nothing to report as stuck and just ends on
@@ -1267,6 +1404,7 @@ fn chainLanding(project: *const Project, start: SymbolId, start_node: Semantic.A
         node = step.node;
         kind = step.kind;
         stepped_to_type = step.is_type;
+        if (step.inst) |found| inst = found;
     }
     return null;
 }
@@ -1444,6 +1582,18 @@ const ChainStep = struct {
     next: SymbolId,
     node: Semantic.Ast.Node.Index,
     kind: FieldChain.Kind,
+    /// Phase 60: the generic instantiation the step read its type out of
+    /// (`txns: SmallMap(TxnId, ActiveTxn)`), carried so a later call whose
+    /// return type is one of the generic's own type parameters can be
+    /// substituted. `null` when the step's type is not an instantiation.
+    inst: ?Instantiation = null,
+};
+
+/// A `Generic(A, B)` type expression: where it is written, so its argument
+/// at a given parameter index can be resolved.
+const Instantiation = struct {
+    file: FileId,
+    node: Ast.Node.Index,
 };
 
 /// The next symbol `chainLanding` should resume its walk from, for a chain
@@ -1451,7 +1601,14 @@ const ChainStep = struct {
 /// type. `null` when the chain isn't stuck (it's finished) or the stuck hop
 /// itself doesn't resolve (it's as finished as it will get) — `chainLanding`
 /// treats both the same way, by returning where the walk stopped.
-fn chainStep(project: *const Project, ast: *const Semantic, cur_file: FileId, chain: *const FieldChain.ChainWalk, depth: usize) ?ChainStep {
+fn chainStep(
+    project: *const Project,
+    ast: *const Semantic,
+    cur_file: FileId,
+    chain: *const FieldChain.ChainWalk,
+    depth: usize,
+    inst: ?Instantiation,
+) ?ChainStep {
     if (chain.stuck_alias) |stuck| {
         const aliased = resolveAlias(project, .{ .file = cur_file, .local = stuck.symbol }) orelse return null;
         if (aliased.file == cur_file and aliased.local == stuck.symbol) return null;
@@ -1460,13 +1617,20 @@ fn chainStep(project: *const Project, ast: *const Semantic, cur_file: FileId, ch
     if (chain.stuck) |stuck| {
         const stuck_id: SymbolId = .{ .file = cur_file, .local = stuck.symbol };
         if (declaredTypeDepth(project, stuck_id, depth + 1)) |ty| {
-            return .{ .next = ty, .node = stuck.node, .kind = stuck.kind };
+            return .{
+                .next = ty,
+                .node = stuck.node,
+                .kind = stuck.kind,
+                .inst = instantiationOf(project, stuck_id),
+            };
         }
         const element = genericPayloadHop(project, ast, stuck_id, stuck.node) orelse return null;
         return .{ .next = element, .node = stuck.node, .kind = .possible, .is_type = true };
     }
     if (chain.stuck_call) |stuck_call| {
-        const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse return null;
+        const fn_id: SymbolId = .{ .file = cur_file, .local = stuck_call.fn_symbol };
+        const ty = genericReturnType(project, fn_id, inst) orelse
+            resolveFnReturnType(project, fn_id) orelse return null;
         return .{ .next = ty, .node = stuck_call.call_node, .kind = stuck_call.kind };
     }
     return null;
@@ -1505,6 +1669,8 @@ fn addChain(
 
     var alias_hops: usize = 0;
     var carrier_hops: usize = 0;
+    // Phase 60: the generic instantiation the walk last read a type out of.
+    var inst: ?Instantiation = null;
     while (true) {
         // Every symbol a segment passed through is as used as its end.
         for (chain.visitedSlice()) |through| {
@@ -1556,6 +1722,7 @@ fn addChain(
 
             try graph.addEdge(gpa, owner_id, ty, start_node, .possible);
 
+            if (instantiationOf(project, stuck_id)) |found| inst = found;
             cur_file = ty.file;
             cur_symbols = &next_file.semantic;
             cur_owner_map = &next_file.owner_map;
@@ -1574,7 +1741,9 @@ fn addChain(
         }
 
         if (chain.stuck_call) |stuck_call| {
-            const ty = resolveFnReturnType(project, .{ .file = cur_file, .local = stuck_call.fn_symbol }) orelse break;
+            const fn_id: SymbolId = .{ .file = cur_file, .local = stuck_call.fn_symbol };
+            const ty = genericReturnType(project, fn_id, inst) orelse
+                resolveFnReturnType(project, fn_id) orelse break;
             const ty_file = project.file(ty.file);
 
             try graph.addEdge(gpa, owner_id, .{ .file = cur_file, .local = stuck_call.fn_symbol }, start_node, .possible);
