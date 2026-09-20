@@ -252,6 +252,11 @@ pub fn parseInto(
                 if (!std.mem.eql(u8, tree.tokenSlice(name_tok), "imports")) continue;
                 try scanImportsField(gpa, &tree, &bindings, &field_bindings, result, field_value);
             }
+            if (testRunnerPath(&tree, struct_init)) |tok| {
+                const path = parseStringLiteral(gpa, &tree, tok) catch continue;
+                errdefer gpa.free(path);
+                try result.test_roots.append(gpa, path);
+            }
             continue;
         }
 
@@ -547,6 +552,39 @@ fn rootSourceFileFromOptions(tree: *const Ast, options: Ast.Node.Index, struct_b
         return pathThroughHelperCall(tree, path_call);
     }
     return null;
+}
+
+/// If `struct_init` is a `std.Build.Step.Compile.TestRunner` literal —
+/// `.path = b.path("...")` next to a `.mode` field — returns the token
+/// index of that path literal. A custom test runner is compiled into every
+/// test binary the `build.zig` declares, but it is named through a struct
+/// field rather than a call argument, so no binding reaches it; matching
+/// the literal's own shape is what keeps the runner from reading as an
+/// orphan file.
+fn testRunnerPath(tree: *const Ast, struct_init: Ast.full.StructInit) ?Ast.TokenIndex {
+    std.debug.assert(struct_init.ast.fields.len <= tree.nodes.len);
+    var path_tok: ?Ast.TokenIndex = null;
+    var has_mode = false;
+    for (struct_init.ast.fields) |field_value| {
+        const name_tok = tree.firstToken(field_value) - 2;
+        const name = tree.tokenSlice(name_tok);
+        if (std.mem.eql(u8, name, "mode")) {
+            has_mode = true;
+            continue;
+        }
+        if (!std.mem.eql(u8, name, "path")) continue;
+        var inner_buf: [1]Ast.Node.Index = undefined;
+        const path_call = tree.fullCall(&inner_buf, field_value) orelse continue;
+        const path_field = fieldAccessName(tree, path_call.ast.fn_expr) orelse continue;
+        if (!std.mem.eql(u8, path_field, "path")) continue;
+        if (path_call.ast.params.len < 1) continue;
+        const arg = path_call.ast.params[0];
+        if (tree.nodeTag(arg) != .string_literal) continue;
+        path_tok = tree.nodeMainToken(arg);
+    }
+    if (!has_mode) return null;
+    std.debug.assert(path_tok == null or path_tok.? < tree.tokens.len);
+    return path_tok;
 }
 
 /// If `node` is a `std.Build.LazyPath` struct literal `.{ .cwd_relative =

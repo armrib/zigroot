@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-61. Implemented so far:
+Status: Phase 0-62. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -377,6 +377,13 @@ Status: Phase 0-61. Implemented so far:
   one. An entry naming a file or declaration that no longer exists **fails
   the run**: a contract nobody checks rots into exactly the baseline this
   tool refuses to keep.
+
+- A custom test runner (Phase 62): `.test_runner = .{ .path = b.path(
+  "test_runner.zig"), .mode = .simple }`. The file is compiled into every
+  test binary the script declares, but it is named through a struct field,
+  which the `build.zig` scan cannot bind to a module — so the runner read as
+  an orphan. The literal's own shape (a `.path = b.path(...)` next to a
+  `.mode`) is matched instead, and the file becomes a test root.
 
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),

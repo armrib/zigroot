@@ -1002,3 +1002,30 @@ test "a library root is recorded separately from an executable one" {
     try t.expectEqualStrings("src/proto.zig", graph.library_roots.items[0]);
     try t.expectEqualStrings("src/api.zig", graph.library_roots.items[1]);
 }
+
+test "a custom test runner named through a struct field is a test root" {
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer file_imports.deinit(t.allocator);
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const test_mod = b.createModule(.{ .root_source_file = b.path("src/all_tests.zig") });
+        \\    const runner: std.Build.Step.Compile.TestRunner = .{
+        \\        .path = b.path("test_runner.zig"),
+        \\        .mode = .simple,
+        \\    };
+        \\    _ = b.addTest(.{ .root_module = test_mod, .test_runner = runner });
+        \\}
+        \\
+    , &file_imports, null);
+
+    // The runner is compiled into the test binary, so it is as much a test
+    // root as the aggregator the binary is built from.
+    try t.expectEqual(@as(usize, 2), graph.test_roots.items.len);
+    try t.expectEqualStrings("test_runner.zig", graph.test_roots.items[0]);
+    try t.expectEqualStrings("src/all_tests.zig", graph.test_roots.items[1]);
+}
