@@ -325,7 +325,15 @@ fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const 
                 // concrete type beats guessing at its whole export set, and
                 // reaches past the first hop, which the guess never did.
                 if (callee) |fn_sym| {
-                    if (try walkDuckChains(gpa, graph, project, owner_id, fn_sym, index, ty)) continue;
+                    // A `comptime T: type` parameter is the same walk with
+                    // nothing guessed: the call site names the concrete type
+                    // and the body names the members off it, so the edges are
+                    // as definite as any resolved chain.
+                    const kind: FieldChain.Kind = if (isComptimeTypeParam(project, fn_sym, index))
+                        .definite
+                    else
+                        .possible;
+                    if (try walkDuckChains(gpa, graph, project, owner_id, fn_sym, index, ty, kind)) continue;
                 }
 
                 const exports = project.file(ty.file).semantic.symbols.get(ty.local).exports;
@@ -356,6 +364,7 @@ fn walkDuckChains(
     fn_sym: SymbolId,
     index: usize,
     ty: SymbolId,
+    kind: FieldChain.Kind,
 ) Allocator.Error!bool {
     const param = paramSymbolAt(project, fn_sym, index) orelse return false;
     const callee_file = project.file(fn_sym.file);
@@ -364,7 +373,7 @@ fn walkDuckChains(
     var walked = false;
     var ref_it = callee_file.semantic.symbols.iterReferences(param);
     while (ref_it.next()) |ref| {
-        try addChain(project, graph, gpa, owner_id, ty.file, &callee_file.semantic, &ty_file.semantic, &ty_file.owner_map, ty.local, ref.node, .possible);
+        try addChain(project, graph, gpa, owner_id, ty.file, &callee_file.semantic, &ty_file.semantic, &ty_file.owner_map, ty.local, ref.node, kind);
         walked = true;
     }
     return walked;
@@ -404,8 +413,39 @@ fn isDuckTypedParam(
     callee: ?SymbolId,
     index: usize,
 ) bool {
-    if (callee) |fn_sym| return isAnytypeParam(project, fn_sym, index);
+    if (callee) |fn_sym| {
+        if (isAnytypeParam(project, fn_sym, index)) return true;
+        return isComptimeTypeParam(project, fn_sym, index);
+    }
     return callsExternalModule(project, file_id, fn_expr);
+}
+
+/// Whether `fn_sym`'s parameter at `index` is declared `comptime <name>:
+/// type` — a generic's type parameter, `Engine(schema, Io)`-style.
+///
+/// The body reaches into whatever the call site passed exactly the way an
+/// `anytype` body does, and the two shapes are the same problem: a member
+/// named only inside the generic. The difference is that here the call site
+/// writes the concrete type down, so the resulting edges need no hedging.
+fn isComptimeTypeParam(project: *const Project, fn_sym: SymbolId, index: usize) bool {
+    const semantic = &project.file(fn_sym.file).semantic;
+    const symbol = semantic.symbols.get(fn_sym.local);
+    if (!symbol.flags.s_fn) return false;
+
+    const ast = &semantic.parse.ast;
+    var proto_buf: [1]Ast.Node.Index = undefined;
+    const proto = ast.fullFnProto(&proto_buf, symbol.decl) orelse return false;
+
+    var it = proto.iterate(ast);
+    var i: usize = 0;
+    while (it.next()) |param| : (i += 1) {
+        if (i != index) continue;
+        if (param.comptime_noalias == null) return false;
+        const type_expr = param.type_expr orelse return false;
+        if (ast.nodeTag(type_expr) != .identifier) return false;
+        return std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(type_expr)), "type");
+    }
+    return false;
 }
 
 /// Whether `fn_sym`'s parameter at `index` is declared `anytype`.

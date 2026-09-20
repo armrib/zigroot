@@ -12,7 +12,9 @@
 //! - `.public_api`: every `pub` symbol, under `PublicPolicy.root` (library
 //!   mode) — see `PublicPolicy` — or, whatever the policy, in a file
 //!   outside the analyzed `build.zig`'s own directory, which this project
-//!   shares with consumers it can't see (`isSharedDependency`).
+//!   shares with consumers it can't see (`isSharedDependency`), or in a
+//!   file a `b.addLibrary`/`b.addModule` root reaches, whose consumers are
+//!   equally invisible (`Project.isLibraryApi`).
 //! - `.comptime_block`: every symbol referenced from a container-level
 //!   `comptime { ... }` block (`comptime { _ = Foo; }`, the idiom for
 //!   forcing analysis of a declaration). Zig evaluates such a block
@@ -104,7 +106,9 @@ pub fn build(gpa: Allocator, project: *const Project, public_policy: PublicPolic
             if (sym.flags.s_export) {
                 try roots.add(gpa, .{ .file = f.id, .local = local }, .@"export");
             }
-            if (sym.visibility == .public and (public_policy == .root or shared)) {
+            if (sym.visibility == .public and
+                (public_policy == .root or shared or project.isLibraryApi(f.id)))
+            {
                 try roots.add(gpa, .{ .file = f.id, .local = local }, .public_api);
             }
 

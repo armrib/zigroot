@@ -973,3 +973,32 @@ test "b.addModule counts as a library, and a b.dependency-backed addImport name 
     try t.expect(!graph.isExternal("mylib"));
     try t.expectEqualStrings("src/root.zig", graph.resolve("mylib").?[0]);
 }
+
+test "a library root is recorded separately from an executable one" {
+    var graph: BuildGraph = .empty;
+    defer graph.deinit(t.allocator);
+
+    var file_imports: std.ArrayListUnmanaged([]u8) = .empty;
+    defer file_imports.deinit(t.allocator);
+
+    try BuildGraph.parseInto(t.allocator, &graph,
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const exe_mod = b.createModule(.{ .root_source_file = b.path("src/main.zig") });
+        \\    _ = b.addExecutable(.{ .name = "app", .root_module = exe_mod });
+        \\    const lib_mod = b.createModule(.{ .root_source_file = b.path("src/proto.zig") });
+        \\    _ = b.addLibrary(.{ .name = "proto", .root_module = lib_mod });
+        \\    _ = b.addModule("api", .{ .root_source_file = b.path("src/api.zig") });
+        \\}
+        \\
+    , &file_imports, null);
+
+    try t.expect(graph.has_library);
+    try t.expect(graph.has_executable);
+
+    // Every artifact is an analysis root; only the two published ones are API.
+    try t.expectEqual(@as(usize, 3), graph.exe_roots.items.len);
+    try t.expectEqual(@as(usize, 2), graph.library_roots.items.len);
+    try t.expectEqualStrings("src/proto.zig", graph.library_roots.items[0]);
+    try t.expectEqualStrings("src/api.zig", graph.library_roots.items[1]);
+}

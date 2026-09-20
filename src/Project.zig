@@ -34,6 +34,9 @@ files: std.ArrayListUnmanaged(File) = .empty,
 /// Canonical absolute path -> FileId. Keys borrow `files[..].path`.
 by_path: std.StringHashMapUnmanaged(FileId) = .empty,
 roots: std.ArrayListUnmanaged(FileId) = .empty,
+/// Files reachable from a root a `b.addLibrary`/`b.addModule` declared —
+/// see `BuildGraph.library_roots` and `isLibraryApi`.
+library_api_files: std.AutoHashMapUnmanaged(FileId, void) = .empty,
 import_graph: ImportGraph = .empty,
 /// Canonical paths of every `.zig` file reachable only through a test
 /// (`@import` inside a `test` block, or a `b.addTest` root module) and
@@ -73,6 +76,7 @@ pub fn deinit(self: *Project) void {
     self.files.deinit(self.gpa);
     self.by_path.deinit(self.gpa);
     self.roots.deinit(self.gpa);
+    self.library_api_files.deinit(self.gpa);
     self.import_graph.deinit(self.gpa);
     var to_it = self.test_only_files.keyIterator();
     while (to_it.next()) |k| self.gpa.free(k.*);
@@ -185,6 +189,8 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
         _ = self.addRoot(target_path) catch continue;
     }
 
+    try self.markLibraryApiFiles();
+
     // Each `b.addTest` target is its own root module, never `@import`ed
     // from anywhere, and test code doesn't count as use — so it seeds no
     // roots and isn't analyzed. It's loaded only so it (and whatever it
@@ -199,6 +205,53 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
 
     try self.resolveTestImports();
     try self.loadTestOnlyFiles();
+}
+
+/// Records every file reachable from a library root, so `Roots` can treat
+/// their `pub` declarations as external API.
+///
+/// A `build.zig` that declares both a library and executables gets one
+/// answer per file rather than one for the whole project: the executables
+/// are still analyzed as executables, and only what the library publishes
+/// is exempt. The walk follows `@import` rather than stopping at the root
+/// file, because reaching a container says nothing about its members —
+/// naming the surface is the whole point of the declaration.
+fn markLibraryApiFiles(self: *Project) !void {
+    const graph = self.build_graph orelse return;
+    if (graph.library_roots.items.len == 0) return;
+
+    var queue: std.ArrayListUnmanaged(FileId) = .empty;
+    defer queue.deinit(self.gpa);
+
+    for (graph.library_roots.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        const canonical = self.canonicalize(target_path) catch continue;
+        defer self.gpa.free(canonical);
+        const id = self.by_path.get(canonical) orelse continue;
+        const gop = try self.library_api_files.getOrPut(self.gpa, id);
+        if (gop.found_existing) continue;
+        try queue.append(self.gpa, id);
+    }
+
+    // Bounded by the file count: every file enters the queue at most once,
+    // guarded by the `found_existing` check above.
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        const from = queue.items[head];
+        for (self.import_graph.edgesFrom(from)) |edge| {
+            const gop = try self.library_api_files.getOrPut(self.gpa, edge.to);
+            if (gop.found_existing) continue;
+            try queue.append(self.gpa, edge.to);
+        }
+    }
+    std.debug.assert(self.library_api_files.count() <= self.files.items.len);
+}
+
+/// Whether `id`'s `pub` declarations are a library's external API — see
+/// `markLibraryApiFiles`.
+pub fn isLibraryApi(self: *const Project, id: FileId) bool {
+    return self.library_api_files.contains(id);
 }
 
 fn noteBuildFile(self: *Project, canonical: []const u8) !void {

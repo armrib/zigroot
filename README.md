@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-16. Implemented so far:
+Status: Phase 0-59. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -333,10 +333,32 @@ Status: Phase 0-16. Implemented so far:
   the same type. Coarse by design: getting it wrong can only add an edge, never
   invent a finding.
 
+- A library root inside a project that also builds executables (Phase 58):
+  `b.addLibrary(.{ .name = "db-proto", ... })` beside three `addExecutable`s,
+  or `b.addModule("db_runtime", ...)` beside a demo binary. Library mode was
+  a whole-project verdict — `has_library and !has_executable` — so a
+  `build.zig` doing both got executable semantics, and the surface the
+  library exists to publish read as dead. Whoever calls it is invisible from
+  here, exactly as in Phase 36. The policy is now per file: what a library or
+  exported-module root reaches has its `pub` declarations treated as API,
+  while the executables' own files are analyzed as before. The walk follows
+  `@import` rather than stopping at the root file, since reaching a container
+  says nothing about its members.
+
+- A comptime `type` parameter (Phase 59): `Engine(schema, Io)`, where the
+  generic's body calls `Io.pwrite(...)`. This is Phase 54's `anytype` walk
+  with nothing left to guess — the call site writes the concrete type down
+  and the body writes the member names down — so the callee's chains are
+  re-walked against the argument's type and the edges are `definite`, not
+  `possible`. The whole-export-set fallback still applies when the callee has
+  no chain to walk.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
-`return struct { ... }`, `@embedFile`/`@cImport`, and `build.zig` shapes
+`return struct { ... }` and the comptime `type` parameters of Phase 59 (a
+project generic's return type written in its own type parameters —
+`SmallMap(K, V).getPtr` returning `?*V` — is still opaque), `@embedFile`/`@cImport`, and `build.zig` shapes
 that need the script actually evaluated (a custom module-registry helper
 struct, say) rather than scanned.
 

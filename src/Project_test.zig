@@ -3,6 +3,10 @@
 const std = @import("std");
 const t = std.testing;
 const Project = @import("Project.zig");
+const Roots = @import("Roots.zig");
+const Resolver = @import("Resolver.zig");
+const Reachability = @import("Reachability.zig");
+const FileId = @import("FileId.zig").FileId;
 
 fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
@@ -819,4 +823,79 @@ test "build.zig and the helper files it imports are not orphans" {
     }
     try t.expectEqual(@as(usize, 3), discovered.items.len);
     for (discovered.items) |p| try t.expect(project.isReachable(p));
+}
+
+test "a library root's pub surface is API even when the same build.zig builds executables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "build.zig",
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+        \\    });
+        \\    _ = b.addLibrary(.{
+        \\        .name = "proto",
+        \\        .root_module = b.createModule(.{ .root_source_file = b.path("src/proto_root.zig") }),
+        \\    });
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "src/main.zig",
+        \\pub fn main() void {}
+        \\fn unused() void {}
+        \\
+    );
+    try writeFile(tmp.dir, "src/proto_root.zig",
+        \\pub const wire = @import("wire.zig");
+        \\
+    );
+    try writeFile(tmp.dir, "src/wire.zig",
+        \\pub fn encode() void {}
+        \\fn helper() void {}
+        \\
+    );
+
+    const build_zig_path = try tmp.dir.realpathAlloc(t.allocator, "build.zig");
+    defer t.allocator.free(build_zig_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    try project.loadBuildGraph(build_zig_path);
+
+    const wire_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "wire.zig")) break f.id;
+    } else unreachable;
+    const main_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "main.zig")) break f.id;
+    } else unreachable;
+
+    // The library reaches wire.zig, so its exports are called from outside;
+    // the executable's own files are still analyzed as an executable's.
+    try t.expect(project.isLibraryApi(wire_id));
+    try t.expect(!project.isLibraryApi(main_id));
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const wire_sem = &project.file(wire_id).semantic;
+    const encode = wire_sem.symbols.getSymbolNamed("encode").?;
+    try t.expect(reachability.isReachable(.{ .file = wire_id, .local = encode }));
+
+    // `pub` is what the library publishes; a private helper nothing calls is
+    // still dead, and the executable's own dead code is untouched.
+    const helper = wire_sem.symbols.getSymbolNamed("helper").?;
+    try t.expect(!reachability.isReachable(.{ .file = wire_id, .local = helper }));
+    const main_sem = &project.file(main_id).semantic;
+    const unused = main_sem.symbols.getSymbolNamed("unused").?;
+    try t.expect(!reachability.isReachable(.{ .file = main_id, .local = unused }));
 }

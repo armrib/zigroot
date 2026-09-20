@@ -53,6 +53,15 @@ test_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 /// of reporting the whole thing orphaned. Owned.
 exe_roots: std.ArrayListUnmanaged([]const u8) = .empty,
 
+/// Root source file paths of the subset of `exe_roots` that a
+/// `b.addLibrary(...)`/`b.addModule(...)` declared, rather than
+/// `b.addExecutable(...)`. A library or exported module states that its
+/// `pub` surface is called from outside this project, so the files it
+/// reaches are API whether or not the same `build.zig` also builds
+/// executables — which is what `has_library`'s whole-project flag cannot
+/// express. Owned.
+library_roots: std.ArrayListUnmanaged([]const u8) = .empty,
+
 /// Whether a `b.addExecutable(...)` call was found anywhere in the scan,
 /// regardless of whether its root module's path could be resolved — used
 /// (together with `has_library`) to infer executable vs. library
@@ -134,6 +143,8 @@ pub fn deinit(self: *BuildGraph, gpa: Allocator) void {
     self.test_roots.deinit(gpa);
     for (self.exe_roots.items) |path| gpa.free(path);
     self.exe_roots.deinit(gpa);
+    // Borrowed from `exe_roots`; the paths themselves are freed above.
+    self.library_roots.deinit(gpa);
     var ext_it = self.external_names.keyIterator();
     while (ext_it.next()) |k| gpa.free(k.*);
     self.external_names.deinit(gpa);
@@ -296,6 +307,9 @@ pub fn parseInto(
                 if (try testRootFromOptions(gpa, &tree, &bindings, &field_bindings, call.ast.params[0], &struct_buf, &call_buf)) |path| {
                     errdefer gpa.free(path);
                     try result.exe_roots.append(gpa, path);
+                    if (!std.mem.eql(u8, field, "addExecutable")) {
+                        try result.library_roots.append(gpa, path);
+                    }
                 }
             }
             continue;
@@ -315,8 +329,14 @@ pub fn parseInto(
                     gpa.free(import_name);
                     continue;
                 };
-                defer gpa.free(path);
+                errdefer gpa.free(path);
                 try addModulePath(gpa, result, import_name, path);
+                // An exported module is a root in its own right: nothing
+                // inside the project need `@import` it for its API to be
+                // live, and no consumer of it is visible from here.
+                // `exe_roots` takes ownership of the path from here on.
+                try result.exe_roots.append(gpa, path);
+                try result.library_roots.append(gpa, path);
             }
             continue;
         }
