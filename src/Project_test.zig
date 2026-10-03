@@ -941,7 +941,8 @@ test "an export contract roots what it names and reports what it doesn't" {
 
     try t.expectEqual(@as(usize, 1), project.contract_roots.items.len);
     try t.expectEqual(@as(usize, 1), project.contract_unresolved.items.len);
-    try t.expectEqualStrings("src/main.zig:gone", project.contract_unresolved.items[0]);
+    try t.expectEqualStrings("src/main.zig:gone", project.contract_unresolved.items[0].spec);
+    try t.expectEqualStrings("gone", project.contract_unresolved.items[0].missing.?);
 
     var roots = try Roots.build(t.allocator, &project, .analyze);
     defer roots.deinit(t.allocator);

@@ -28,6 +28,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ast = std.zig.Ast;
+const FieldChain = @import("FieldChain.zig");
+const OwnerMap = @import("OwnerMap.zig");
+const Semantic = @import("semantic/Semantic.zig");
 
 const ExportContract = @This();
 
@@ -37,7 +40,8 @@ pub const Entry = struct {
     spec: []const u8,
     /// Path relative to the directory holding the `.zigroot.zon`.
     path: []const u8,
-    /// The single declaration named, or `null` for every `pub` one.
+    /// The declaration named — bare (`decl`) or qualified (`Outer.inner`) —
+    /// or `null` for every `pub` one.
     symbol: ?[]const u8,
 };
 
@@ -109,4 +113,44 @@ fn fieldName(tree: *const Ast, value_node: Ast.Node.Index) ?[]const u8 {
     const raw = tree.tokenSlice(name_tok);
     if (std.mem.startsWith(u8, raw, "@\"") and raw.len >= 3) return raw[2 .. raw.len - 1];
     return raw;
+}
+
+/// What an entry's `symbol` names inside one loaded file.
+pub const Lookup = union(enum) {
+    found: Semantic.Symbol.Id,
+    /// The first segment of `symbol` that names nothing — the whole name for
+    /// the bare form. Borrows the entry's `spec`.
+    missing: []const u8,
+};
+
+/// Bounds a qualified name's depth; no real container nests this deep.
+const segment_count_max: u32 = 64;
+
+/// Every file's top-level declarations are exported from symbol 0, the one
+/// ZLint's `SemanticBuilder.enterRoot` creates first.
+const file_root_symbol: Semantic.Symbol.Id = @enumFromInt(0);
+
+/// Resolves `symbol` in `semantic`. A bare name matches any declaration of
+/// that name in the file; a dotted `Outer.inner` walks container members
+/// from the file root, so two same-named methods can be told apart.
+pub fn lookup(semantic: *const Semantic, owner_map: *const OwnerMap, symbol: []const u8) Lookup {
+    std.debug.assert(symbol.len > 0);
+    if (std.mem.indexOfScalar(u8, symbol, '.') == null) {
+        const named = semantic.symbols.getSymbolNamed(symbol) orelse return .{ .missing = symbol };
+        return .{ .found = named };
+    }
+
+    var container = file_root_symbol;
+    var segments = std.mem.splitScalar(u8, symbol, '.');
+    var segment_count: u32 = 0;
+    while (segments.next()) |segment| {
+        segment_count += 1;
+        if (segment_count > segment_count_max) return .{ .missing = segment };
+        if (segment.len == 0) return .{ .missing = segment };
+        container = FieldChain.findExport(semantic, owner_map, container, segment) orelse
+            return .{ .missing = segment };
+    }
+    std.debug.assert(segment_count >= 2);
+    std.debug.assert(container != file_root_symbol);
+    return .{ .found = container };
 }

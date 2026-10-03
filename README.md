@@ -385,6 +385,13 @@ Status: Phase 0-62. Implemented so far:
   an orphan. The literal's own shape (a `.path = b.path(...)` next to a
   `.mode`) is matched instead, and the file becomes a test root.
 
+- A qualified contract entry (Phase 63): `"http.zig:Upload.open"`. A bare
+  `file:decl` matches the name anywhere in the file, so with `Stream.open`
+  and `Upload.open` side by side it picks one and leaves the other dead. A
+  dotted name walks container members from the file root instead, and a
+  stale one reports the first segment that names nothing
+  (`no declaration 'close'`).
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

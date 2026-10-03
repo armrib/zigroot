@@ -66,7 +66,7 @@ contract: ExportContract = .empty,
 contract_roots: std.ArrayListUnmanaged(ContractRoot) = .empty,
 /// One per `contract` entry that named a file this project never loaded, or
 /// a declaration that file doesn't declare. Borrows `contract`'s strings.
-contract_unresolved: std.ArrayListUnmanaged([]const u8) = .empty,
+contract_unresolved: std.ArrayListUnmanaged(ContractUnresolved) = .empty,
 /// Canonical paths of the `build.zig` and every file it pulls in (local
 /// `@import`s and cross-file helpers) while `loadBuildGraph` scans it.
 /// Build scripts are the build's own roots, never `@import`ed by project
@@ -227,6 +227,13 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
 }
 
 /// A declaration (or whole file) an `.zigroot.zon` entry resolved to.
+/// A contract entry that named nothing. `missing` is the declaration segment
+/// not found, or `null` when the file itself never loaded.
+pub const ContractUnresolved = struct {
+    spec: []const u8,
+    missing: ?[]const u8,
+};
+
 pub const ContractRoot = struct {
     file: FileId,
     symbol: ?Semantic.Symbol.Id,
@@ -251,30 +258,33 @@ fn loadContract(self: *Project) !void {
 fn resolveContract(self: *Project) !void {
     for (self.contract.entries.items) |entry| {
         const resolved = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, entry.path }) catch {
-            try self.contract_unresolved.append(self.gpa, entry.spec);
+            try self.contract_unresolved.append(self.gpa, .{ .spec = entry.spec, .missing = null });
             continue;
         };
         defer self.gpa.free(resolved);
         const canonical = self.canonicalize(resolved) catch {
-            try self.contract_unresolved.append(self.gpa, entry.spec);
+            try self.contract_unresolved.append(self.gpa, .{ .spec = entry.spec, .missing = null });
             continue;
         };
         defer self.gpa.free(canonical);
 
         const id = self.by_path.get(canonical) orelse {
-            try self.contract_unresolved.append(self.gpa, entry.spec);
+            try self.contract_unresolved.append(self.gpa, .{ .spec = entry.spec, .missing = null });
             continue;
         };
         const name = entry.symbol orelse {
             try self.contract_roots.append(self.gpa, .{ .file = id, .symbol = null });
             continue;
         };
-        const semantic = &self.file(id).semantic;
-        const named = semantic.symbols.getSymbolNamed(name) orelse {
-            try self.contract_unresolved.append(self.gpa, entry.spec);
-            continue;
-        };
-        try self.contract_roots.append(self.gpa, .{ .file = id, .symbol = named });
+        const target = self.file(id);
+        switch (ExportContract.lookup(&target.semantic, &target.owner_map, name)) {
+            .found => |named| {
+                try self.contract_roots.append(self.gpa, .{ .file = id, .symbol = named });
+            },
+            .missing => |segment| {
+                try self.contract_unresolved.append(self.gpa, .{ .spec = entry.spec, .missing = segment });
+            },
+        }
     }
     std.debug.assert(self.contract_roots.items.len + self.contract_unresolved.items.len ==
         self.contract.entries.items.len);

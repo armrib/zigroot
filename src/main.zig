@@ -111,8 +111,12 @@ pub fn main() !u8 {
         std.debug.print("\n{d} stale export contract entr(ies) in '.zigroot.zon':\n", .{
             project.contract_unresolved.items.len,
         });
-        for (project.contract_unresolved.items) |spec| {
-            std.debug.print("  {s}: names no loaded file or declaration\n", .{spec});
+        for (project.contract_unresolved.items) |unresolved| {
+            if (unresolved.missing) |segment| {
+                std.debug.print("  {s}: no declaration '{s}'\n", .{ unresolved.spec, segment });
+            } else {
+                std.debug.print("  {s}: names no loaded file\n", .{unresolved.spec});
+            }
         }
         had_findings = true;
     }
