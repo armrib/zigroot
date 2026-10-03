@@ -392,6 +392,12 @@ Status: Phase 0-62. Implemented so far:
   stale one reports the first segment that names nothing
   (`no declaration 'close'`).
 
+- A comptime `type` parameter kept in a field (Phase 64): `Scheduler(cfg,
+  Clock, FlushingRing)` stores `ring: *Ring` and calls `self.ring.poll()`.
+  The chain's base is `self`, not `Ring`, so Phase 59's walk never sees it.
+  Every `pub` export of the passed type whose name the generic's body writes
+  as a `.name` member access is edged `possible`; the rest stays dead.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own

@@ -875,3 +875,68 @@ test "a comptime type parameter reaches the members the generic names on it" {
     try t.expect(!reachability.isReachable(.{ .file = io_id, .local = never_named }));
     try t.expect(!reachability.isPossiblyReachable(.{ .file = io_id, .local = never_named }));
 }
+
+test "a comptime type parameter stored in a field reaches the members called through it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const scheduler = @import("scheduler.zig");
+        \\const ring = @import("ring.zig");
+        \\pub fn main() void {
+        \\    var r: ring.FlushingRing = .{};
+        \\    var s = scheduler.Scheduler(ring.FlushingRing){ .ring = &r };
+        \\    s.tick();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "scheduler.zig",
+        \\pub fn Scheduler(comptime Ring: type) type {
+        \\    return struct {
+        \\        ring: *Ring,
+        \\        pub fn tick(self: *@This()) void {
+        \\            self.ring.poll();
+        \\            self.ring.submit();
+        \\        }
+        \\    };
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "ring.zig",
+        \\pub const FlushingRing = struct {
+        \\    pub fn poll(_: *FlushingRing) void {}
+        \\    pub fn submit(_: *FlushingRing) void {}
+        \\    pub fn never_named(_: *FlushingRing) void {}
+        \\};
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+    const ring_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "ring.zig")) break f.id;
+    } else unreachable;
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const ring_sem = &project.file(ring_id).semantic;
+    const poll = ring_sem.symbols.getSymbolNamed("poll").?;
+    const submit = ring_sem.symbols.getSymbolNamed("submit").?;
+    try t.expect(reachability.isReachable(.{ .file = ring_id, .local = poll }));
+    try t.expect(reachability.isReachable(.{ .file = ring_id, .local = submit }));
+
+    // Only names the generic's body writes count; the rest of the type stays dead.
+    const never_named = ring_sem.symbols.getSymbolNamed("never_named").?;
+    try t.expect(!reachability.isReachable(.{ .file = ring_id, .local = never_named }));
+}

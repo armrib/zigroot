@@ -341,7 +341,12 @@ fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const 
                         .definite
                     else
                         .possible;
-                    if (try walkDuckChains(gpa, graph, project, owner_id, fn_sym, index, ty, kind)) continue;
+                    const walked = try walkDuckChains(gpa, graph, project, owner_id, fn_sym, index, ty, kind);
+                    if (kind == .definite) {
+                        try edgeMembersNamedInBody(gpa, graph, project, owner_id, fn_sym, ty, node);
+                        continue;
+                    }
+                    if (walked) continue;
                 }
 
                 const exports = project.file(ty.file).semantic.symbols.get(ty.local).exports;
@@ -385,6 +390,53 @@ fn walkDuckChains(
         walked = true;
     }
     return walked;
+}
+
+/// Phase 64: a generic stores its `comptime Ring: type` in a field (`ring:
+/// *Ring`) and calls `self.ring.poll()`; the chain's base is `self`, not the
+/// parameter, so `walkDuckChains` never sees it. Edge every `pub` export of
+/// `ty` whose name the generic's body writes as a `.name` member access.
+fn edgeMembersNamedInBody(
+    gpa: Allocator,
+    graph: *SymbolGraph,
+    project: *const Project,
+    owner_id: SymbolId,
+    fn_sym: SymbolId,
+    ty: SymbolId,
+    call_node: Ast.Node.Index,
+) Allocator.Error!void {
+    const callee_semantic = &project.file(fn_sym.file).semantic;
+    const callee_ast = &callee_semantic.parse.ast;
+    const decl = callee_semantic.symbols.get(fn_sym.local).decl;
+    const token_first = callee_ast.firstToken(decl);
+    const token_last = callee_ast.lastToken(decl);
+    std.debug.assert(token_first <= token_last);
+
+    const ty_semantic = &project.file(ty.file).semantic;
+    for (ty_semantic.symbols.get(ty.local).exports.items) |member| {
+        const symbol = ty_semantic.symbols.get(member);
+        if (symbol.visibility != .public) continue;
+        if (!isMemberNameInRange(callee_ast, token_first, token_last, symbol.name)) continue;
+        try graph.addEdge(gpa, owner_id, .{ .file = ty.file, .local = member }, call_node, .possible);
+    }
+}
+
+/// Whether `.name` appears as a member access between two tokens, inclusive.
+fn isMemberNameInRange(
+    ast: *const Ast,
+    token_first: Ast.TokenIndex,
+    token_last: Ast.TokenIndex,
+    name: []const u8,
+) bool {
+    std.debug.assert(token_first <= token_last);
+    std.debug.assert(token_last < ast.tokens.len);
+    var token = token_first + 1;
+    while (token <= token_last) : (token += 1) {
+        if (ast.tokenTag(token) != .identifier) continue;
+        if (ast.tokenTag(token - 1) != .period) continue;
+        if (std.mem.eql(u8, ast.tokenSlice(token), name)) return true;
+    }
+    return false;
 }
 
 /// The symbol bound to `fn_sym`'s `index`-th parameter, matched by the name
