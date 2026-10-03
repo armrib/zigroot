@@ -21,6 +21,7 @@ pub const Scc = @import("Scc.zig");
 pub const Report = @import("Report.zig");
 pub const BuildGraph = @import("BuildGraph.zig");
 pub const ZonFile = @import("ZonFile.zig");
+pub const ExportContract = @import("ExportContract.zig");
 pub const Project = @import("Project.zig");
 
 test {
@@ -40,5 +41,6 @@ test {
     _ = @import("Scc_test.zig");
     _ = @import("BuildGraph_test.zig");
     _ = @import("ZonFile_test.zig");
+    _ = @import("ExportContract_test.zig");
     _ = @import("self_test.zig");
 }

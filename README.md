@@ -7,7 +7,7 @@ single-file; `zigroot` adds the project layer above it: file discovery,
 reachability so mutually-referencing-but-globally-dead code can be found
 across a whole codebase, not just within one file.
 
-Status: Phase 0-16. Implemented so far:
+Status: Phase 0-62. Implemented so far:
 
 - `Project`: loads root files, follows `@import("*.zig")` transitively,
   builds a file-level import graph (`src/Project.zig`,
@@ -333,10 +333,63 @@ Status: Phase 0-16. Implemented so far:
   the same type. Coarse by design: getting it wrong can only add an edge, never
   invent a finding.
 
+- A library root inside a project that also builds executables (Phase 58):
+  `b.addLibrary(.{ .name = "db-proto", ... })` beside three `addExecutable`s,
+  or `b.addModule("db_runtime", ...)` beside a demo binary. Library mode was
+  a whole-project verdict — `has_library and !has_executable` — so a
+  `build.zig` doing both got executable semantics, and the surface the
+  library exists to publish read as dead. Whoever calls it is invisible from
+  here, exactly as in Phase 36. The policy is now per file: what a library or
+  exported-module root reaches has its `pub` declarations treated as API,
+  while the executables' own files are analyzed as before. The walk follows
+  `@import` rather than stopping at the root file, since reaching a container
+  says nothing about its members.
+
+- A comptime `type` parameter (Phase 59): `Engine(schema, Io)`, where the
+  generic's body calls `Io.pwrite(...)`. This is Phase 54's `anytype` walk
+  with nothing left to guess — the call site writes the concrete type down
+  and the body writes the member names down — so the callee's chains are
+  re-walked against the argument's type and the edges are `definite`, not
+  `possible`. The whole-export-set fallback still applies when the callee has
+  no chain to walk.
+
+- A project generic's return type (Phase 60): `self.txns.getPtr(id)`, where
+  `txns: SmallMap(TxnId, ActiveTxn)` and `getPtr` returns `?*V`. The return
+  type is written in the generic's own vocabulary, so reading it where the
+  generic is declared answers `V` and nothing more — the meaning is at the
+  instantiation. Phase 52/57 model this for std's containers by accessor
+  name; a generic this project declares says it exactly, so the receiver's
+  instantiation is carried along the chain walk and its argument substituted
+  at the parameter's index.
+
+- A surface consumed only from outside the project (Phase 61): a codec three
+  sibling demos import by path, a symbol a generated SDK resolves by name.
+  Those callers are not in the file set, so no inference will ever find
+  them, and the alternative — `comptime { _ = Foo.bar; }` in the source — is
+  a declaration that exists only to quiet this tool. The project states the
+  contract instead, in a `.zigroot.zon` beside its `build.zig`:
+
+  ```zig
+  .{ .exports = .{ "src/catalog/catalog.zig:typeByName", "src/proto_root.zig" } }
+  ```
+
+  Whole-file entries publish every `pub` declaration; `path:symbol` publishes
+  one. An entry naming a file or declaration that no longer exists **fails
+  the run**: a contract nobody checks rots into exactly the baseline this
+  tool refuses to keep.
+
+- A custom test runner (Phase 62): `.test_runner = .{ .path = b.path(
+  "test_runner.zig"), .mode = .simple }`. The file is compiled into every
+  test binary the script declares, but it is named through a struct field,
+  which the `build.zig` scan cannot bind to a module — so the runner read as
+  an orphan. The literal's own shape (a `.path = b.path(...)` next to a
+  `.mode`) is matched instead, and the file becomes a test root.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
-`return struct { ... }`, `@embedFile`/`@cImport`, and `build.zig` shapes
+`return struct { ... }`, the comptime `type` parameters of Phase 59 and the
+return-type substitution of Phase 60, `@embedFile`/`@cImport`, and `build.zig` shapes
 that need the script actually evaluated (a custom module-registry helper
 struct, say) rather than scanned.
 
@@ -383,6 +436,7 @@ and no executable is analyzed in library mode (every `pub` symbol counts
 as reachable API); otherwise `pub` alone doesn't make a symbol a root.
 
 Output, in order: parse errors, external modules, unresolved imports,
+stale `.zigroot.zon` entries,
 test-only files, orphan files, dead declarations
 (`path:line:col: kind name`, sorted by file and line, a dead cycle
 collapsed into one line), and possibly-dead declarations (only reached
@@ -415,6 +469,7 @@ src/
   Report.zig                  findings with path:line:col, cycles collapsed
   BuildGraph.zig              build.zig module-name -> file resolution
   ZonFile.zig                 build.zig.zon dependency names and path dependencies
+  ExportContract.zig          .zigroot.zon: the surface consumers outside the project call
   self_test.zig               integration test: analyzes this repo, pins the expected findings
   main.zig                    CLI
   semantic/                   per-file semantic analysis (copied from ZLint, see below)

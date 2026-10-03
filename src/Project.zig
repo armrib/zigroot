@@ -26,6 +26,7 @@ const ImportGraph = @import("ImportGraph.zig");
 const SymbolId = @import("SymbolId.zig").SymbolId;
 const BuildGraph = @import("BuildGraph.zig");
 const ZonFile = @import("ZonFile.zig");
+const ExportContract = @import("ExportContract.zig");
 
 const Project = @This();
 
@@ -34,6 +35,9 @@ files: std.ArrayListUnmanaged(File) = .empty,
 /// Canonical absolute path -> FileId. Keys borrow `files[..].path`.
 by_path: std.StringHashMapUnmanaged(FileId) = .empty,
 roots: std.ArrayListUnmanaged(FileId) = .empty,
+/// Files reachable from a root a `b.addLibrary`/`b.addModule` declared —
+/// see `BuildGraph.library_roots` and `isLibraryApi`.
+library_api_files: std.AutoHashMapUnmanaged(FileId, void) = .empty,
 import_graph: ImportGraph = .empty,
 /// Canonical paths of every `.zig` file reachable only through a test
 /// (`@import` inside a `test` block, or a `b.addTest` root module) and
@@ -53,6 +57,16 @@ build_graph_dir: []const u8 = "",
 /// its dependency names are external modules, and its path dependencies
 /// are excluded from `discoverZigFiles`. Empty until `loadBuildGraph`.
 zon: ZonFile = .empty,
+/// The `.zigroot.zon` next to the loaded `build.zig`, if there was one: the
+/// surface this project publishes to consumers no file here can name.
+/// Resolved into `contract_roots` once the files are loaded.
+contract: ExportContract = .empty,
+/// One per `contract` entry that resolved, in the same order — the file it
+/// names, and the declaration inside it (`null` for the whole-file form).
+contract_roots: std.ArrayListUnmanaged(ContractRoot) = .empty,
+/// One per `contract` entry that named a file this project never loaded, or
+/// a declaration that file doesn't declare. Borrows `contract`'s strings.
+contract_unresolved: std.ArrayListUnmanaged([]const u8) = .empty,
 /// Canonical paths of the `build.zig` and every file it pulls in (local
 /// `@import`s and cross-file helpers) while `loadBuildGraph` scans it.
 /// Build scripts are the build's own roots, never `@import`ed by project
@@ -73,6 +87,7 @@ pub fn deinit(self: *Project) void {
     self.files.deinit(self.gpa);
     self.by_path.deinit(self.gpa);
     self.roots.deinit(self.gpa);
+    self.library_api_files.deinit(self.gpa);
     self.import_graph.deinit(self.gpa);
     var to_it = self.test_only_files.keyIterator();
     while (to_it.next()) |k| self.gpa.free(k.*);
@@ -82,6 +97,9 @@ pub fn deinit(self: *Project) void {
     if (self.build_graph) |*bg| bg.deinit(self.gpa);
     if (self.build_graph_dir.len > 0) self.gpa.free(self.build_graph_dir);
     self.zon.deinit(self.gpa);
+    self.contract_roots.deinit(self.gpa);
+    self.contract_unresolved.deinit(self.gpa);
+    self.contract.deinit(self.gpa);
     var bf_it = self.build_files.keyIterator();
     while (bf_it.next()) |k| self.gpa.free(k.*);
     self.build_files.deinit(self.gpa);
@@ -173,6 +191,7 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
     self.build_graph = graph;
 
     try self.loadZon();
+    try self.loadContract();
 
     // Every `addExecutable`/`addLibrary`/`addModule` root module is an
     // analysis root: load each as if it were passed explicitly so the run
@@ -184,6 +203,8 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
         defer self.gpa.free(target_path);
         _ = self.addRoot(target_path) catch continue;
     }
+
+    try self.markLibraryApiFiles();
 
     // Each `b.addTest` target is its own root module, never `@import`ed
     // from anywhere, and test code doesn't count as use — so it seeds no
@@ -199,6 +220,111 @@ pub fn loadBuildGraph(self: *Project, build_zig_path: []const u8) !void {
 
     try self.resolveTestImports();
     try self.loadTestOnlyFiles();
+
+    // Last: an entry naming a test-only file resolves against the same file
+    // set the report speaks about.
+    try self.resolveContract();
+}
+
+/// A declaration (or whole file) an `.zigroot.zon` entry resolved to.
+pub const ContractRoot = struct {
+    file: FileId,
+    symbol: ?Semantic.Symbol.Id,
+};
+
+/// Reads the `.zigroot.zon` beside the loaded `build.zig`, if any. A missing
+/// file is not an error: most projects publish nothing this analysis can't
+/// already see.
+fn loadContract(self: *Project) !void {
+    const path = try std.fs.path.join(self.gpa, &.{ self.build_graph_dir, ".zigroot.zon" });
+    defer self.gpa.free(path);
+
+    const source = File.readFileSentinel(self.gpa, path) catch return;
+    defer self.gpa.free(source);
+
+    self.contract = try ExportContract.parse(self.gpa, source);
+}
+
+/// Resolves every contract entry against the loaded files, recording what
+/// each names in `contract_roots` and what it failed to name in
+/// `contract_unresolved` — a stale entry is a finding, not a no-op.
+fn resolveContract(self: *Project) !void {
+    for (self.contract.entries.items) |entry| {
+        const resolved = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, entry.path }) catch {
+            try self.contract_unresolved.append(self.gpa, entry.spec);
+            continue;
+        };
+        defer self.gpa.free(resolved);
+        const canonical = self.canonicalize(resolved) catch {
+            try self.contract_unresolved.append(self.gpa, entry.spec);
+            continue;
+        };
+        defer self.gpa.free(canonical);
+
+        const id = self.by_path.get(canonical) orelse {
+            try self.contract_unresolved.append(self.gpa, entry.spec);
+            continue;
+        };
+        const name = entry.symbol orelse {
+            try self.contract_roots.append(self.gpa, .{ .file = id, .symbol = null });
+            continue;
+        };
+        const semantic = &self.file(id).semantic;
+        const named = semantic.symbols.getSymbolNamed(name) orelse {
+            try self.contract_unresolved.append(self.gpa, entry.spec);
+            continue;
+        };
+        try self.contract_roots.append(self.gpa, .{ .file = id, .symbol = named });
+    }
+    std.debug.assert(self.contract_roots.items.len + self.contract_unresolved.items.len ==
+        self.contract.entries.items.len);
+}
+
+/// Records every file reachable from a library root, so `Roots` can treat
+/// their `pub` declarations as external API.
+///
+/// A `build.zig` that declares both a library and executables gets one
+/// answer per file rather than one for the whole project: the executables
+/// are still analyzed as executables, and only what the library publishes
+/// is exempt. The walk follows `@import` rather than stopping at the root
+/// file, because reaching a container says nothing about its members —
+/// naming the surface is the whole point of the declaration.
+fn markLibraryApiFiles(self: *Project) !void {
+    const graph = self.build_graph orelse return;
+    if (graph.library_roots.items.len == 0) return;
+
+    var queue: std.ArrayListUnmanaged(FileId) = .empty;
+    defer queue.deinit(self.gpa);
+
+    for (graph.library_roots.items) |rel_path| {
+        const target_path = std.fs.path.resolve(self.gpa, &.{ self.build_graph_dir, rel_path }) catch continue;
+        defer self.gpa.free(target_path);
+        const canonical = self.canonicalize(target_path) catch continue;
+        defer self.gpa.free(canonical);
+        const id = self.by_path.get(canonical) orelse continue;
+        const gop = try self.library_api_files.getOrPut(self.gpa, id);
+        if (gop.found_existing) continue;
+        try queue.append(self.gpa, id);
+    }
+
+    // Bounded by the file count: every file enters the queue at most once,
+    // guarded by the `found_existing` check above.
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        const from = queue.items[head];
+        for (self.import_graph.edgesFrom(from)) |edge| {
+            const gop = try self.library_api_files.getOrPut(self.gpa, edge.to);
+            if (gop.found_existing) continue;
+            try queue.append(self.gpa, edge.to);
+        }
+    }
+    std.debug.assert(self.library_api_files.count() <= self.files.items.len);
+}
+
+/// Whether `id`'s `pub` declarations are a library's external API — see
+/// `markLibraryApiFiles`.
+pub fn isLibraryApi(self: *const Project, id: FileId) bool {
+    return self.library_api_files.contains(id);
 }
 
 fn noteBuildFile(self: *Project, canonical: []const u8) !void {

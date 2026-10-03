@@ -813,3 +813,65 @@ test "a field's array length stays referenced after an inline enum field" {
     const max = semantic.symbols.getSymbolNamed("RESPONSE_MAX").?;
     try t.expect(reachability.isReachable(.{ .file = file_id, .local = max }));
 }
+
+test "a comptime type parameter reaches the members the generic names on it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writeFile(tmp.dir, "main.zig",
+        \\const engine = @import("engine.zig");
+        \\const io = @import("io.zig");
+        \\pub fn main() void {
+        \\    var e = engine.Engine(io.UringIo){};
+        \\    e.run();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "engine.zig",
+        \\pub fn Engine(comptime Io: type) type {
+        \\    return struct {
+        \\        pub fn run(_: @This()) void {
+        \\            Io.pwrite();
+        \\        }
+        \\    };
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "io.zig",
+        \\pub const UringIo = struct {
+        \\    pub fn pwrite() void {}
+        \\    pub fn never_named() void {}
+        \\};
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+    const io_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "io.zig")) break f.id;
+    } else unreachable;
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const io_sem = &project.file(io_id).semantic;
+    const pwrite = io_sem.symbols.getSymbolNamed("pwrite").?;
+    // Definite, not merely possible: the call site writes the concrete type
+    // down and the generic's body writes the member name down.
+    try t.expect(reachability.isReachable(.{ .file = io_id, .local = pwrite }));
+
+    // And precise: the whole-export-set guess is not what answered here.
+    const never_named = io_sem.symbols.getSymbolNamed("never_named").?;
+    try t.expect(!reachability.isReachable(.{ .file = io_id, .local = never_named }));
+    try t.expect(!reachability.isPossiblyReachable(.{ .file = io_id, .local = never_named }));
+}
