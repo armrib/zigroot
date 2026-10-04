@@ -940,3 +940,78 @@ test "a comptime type parameter stored in a field reaches the members called thr
     const never_named = ring_sem.symbols.getSymbolNamed("never_named").?;
     try t.expect(!reachability.isReachable(.{ .file = ring_id, .local = never_named }));
 }
+
+test "a comptime type argument reaches the generic's field calls through a re-export alias" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // `raft.Scheduler` names `mod.zig`'s alias, not the generic itself.
+    try writeFile(tmp.dir, "main.zig",
+        \\const loop = @import("loop.zig");
+        \\pub fn main() void {
+        \\    var r: loop.FlushingRing = .{};
+        \\    var s = loop.Scheduler{ .ring = &r };
+        \\    s.tick();
+        \\}
+        \\
+    );
+    try writeFile(tmp.dir, "loop.zig",
+        \\const raft = @import("mod.zig");
+        \\pub const Scheduler = raft.Scheduler(.{ .limit = 3 }, u64, FlushingRing);
+        \\pub const FlushingRing = struct {
+        \\    pub fn poll(_: *FlushingRing) void {}
+        \\    pub fn submit(_: *FlushingRing) void {}
+        \\    pub fn never_named(_: *FlushingRing) void {}
+        \\};
+        \\
+    );
+    try writeFile(tmp.dir, "mod.zig",
+        \\const scheduler = @import("scheduler.zig");
+        \\pub const Scheduler = scheduler.Scheduler;
+        \\
+    );
+    try writeFile(tmp.dir, "scheduler.zig",
+        \\pub const Config = struct { limit: u32 };
+        \\pub fn Scheduler(comptime config: Config, comptime Clock: type, comptime Ring: type) type {
+        \\    _ = config;
+        \\    _ = Clock;
+        \\    return struct {
+        \\        ring: *Ring,
+        \\        pub fn tick(self: *@This()) void {
+        \\            self.ring.poll();
+        \\            self.ring.submit();
+        \\        }
+        \\    };
+        \\}
+        \\
+    );
+    const root_path = try tmp.dir.realpathAlloc(t.allocator, "main.zig");
+    defer t.allocator.free(root_path);
+
+    var project: Project = .init(t.allocator);
+    defer project.deinit();
+
+    _ = try project.addRoot(root_path);
+    const loop_id: FileId = for (project.files.items) |f| {
+        if (std.mem.endsWith(u8, f.path, "loop.zig")) break f.id;
+    } else unreachable;
+
+    var roots = try Roots.build(t.allocator, &project, .analyze);
+    defer roots.deinit(t.allocator);
+
+    var cross_file = try Resolver.build(t.allocator, &project);
+    defer cross_file.deinit(t.allocator);
+
+    var reachability = try Reachability.build(t.allocator, &project, &roots, &cross_file);
+    defer reachability.deinit(t.allocator);
+
+    const loop_sem = &project.file(loop_id).semantic;
+    const poll = loop_sem.symbols.getSymbolNamed("poll").?;
+    const submit = loop_sem.symbols.getSymbolNamed("submit").?;
+    try t.expect(reachability.isReachable(.{ .file = loop_id, .local = poll }));
+    try t.expect(reachability.isReachable(.{ .file = loop_id, .local = submit }));
+
+    const never_named = loop_sem.symbols.getSymbolNamed("never_named").?;
+    try t.expect(!reachability.isReachable(.{ .file = loop_id, .local = never_named }));
+    try t.expect(!reachability.isPossiblyReachable(.{ .file = loop_id, .local = never_named }));
+}

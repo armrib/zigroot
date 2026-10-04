@@ -322,7 +322,13 @@ fn buildDuckTypedArguments(gpa: Allocator, graph: *SymbolGraph, project: *const 
             const owner = ownerOf(&file, node) orelse continue;
             const owner_id: SymbolId = .{ .file = file.id, .local = owner };
 
-            const callee = resolveValueChain(project, file.id, call.ast.fn_expr);
+            // A re-exported generic (`raft.Scheduler`, where the module root
+            // says `pub const Scheduler = scheduler.Scheduler;`) resolves to
+            // the alias, whose prototype has no parameters to inspect.
+            const callee: ?SymbolId = if (resolveValueChain(project, file.id, call.ast.fn_expr)) |found|
+                aliasTarget(project, found)
+            else
+                null;
             for (call.ast.params, 0..) |arg, index| {
                 if (!isDuckTypedParam(project, file.id, call.ast.fn_expr, callee, index)) continue;
                 const ty = argumentType(project, file.id, arg) orelse continue;

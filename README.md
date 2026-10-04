@@ -398,6 +398,11 @@ Status: Phase 0-62. Implemented so far:
   Every `pub` export of the passed type whose name the generic's body writes
   as a `.name` member access is edged `possible`; the rest stays dead.
 
+- A re-exported generic's type parameters (Phase 65): `raft.Scheduler(...)`
+  resolves to the module root's `pub const Scheduler = scheduler.Scheduler;`,
+  an alias with no prototype, so no argument looked duck-typed and Phases 59
+  and 64 never ran. The callee is now followed to the end of its alias chain.
+
 Not handled, by design: real type inference for instance-method calls
 (`inflight.cont.call()` where `inflight` comes from `map.fetchRemove(...)`),
 generic instantiation tracking beyond a `type`-returning function's own
